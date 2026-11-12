@@ -45,7 +45,7 @@ The driver line is picked from the installed userspace package.
 - pacman ≥ 7.1 and `dkms`. The package pulls in `dkms`.
 - Limine with `limine-mkinitcpio-hook`. On other boot setups, regenerate the initramfs yourself after `sync`.
 - Don't install `linux-cachyos-eac-headers`. The EAC kernel must only use its prebuilt, CachyOS-signed module.
-- For CachyOS kernels, install their prebuilt module, `linux-cachyos-nvidia-580xx` or `linux-cachyos-nvidia-open`, or their headers to use DKMS instead.
+- CachyOS kernels work like any other: with their headers installed (e.g. `linux-cachyos-headers`), DKMS builds for them from the same source. Their prebuilt `linux-cachyos-nvidia-*` packages are optional. They skip the compile on updates and use about half the disk space, since DKMS keeps its own copy of every build. If you install one, DKMS leaves that kernel alone, so there is never more than one module per kernel.
 
 ## Install
 
