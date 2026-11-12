@@ -4,7 +4,7 @@ pkgname=eac-dkms-workaround-git
 _repo=eac-dkms-workaround
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='DKMS NVIDIA module for the stock Arch kernel next to the CachyOS EAC kernel prebuilt NVIDIA module (git)'
+pkgdesc='DKMS NVIDIA modules for non-CachyOS kernels next to the CachyOS EAC kernel (git)'
 arch=('any')
 url='https://github.com/nimonht/eac-dkms-workaround'
 license=('MIT')
@@ -14,12 +14,17 @@ depends=(
     'dkms'
     'kmod'
     'libarchive'
-    'linux-headers'
     'pacman>=7.1'
     'util-linux'
 )
 makedepends=('git')
-optdepends=('limine-mkinitcpio-hook: regenerate Limine boot entries after a module rebuild')
+optdepends=(
+    'linux-headers: build for the stock linux kernel'
+    'linux-lts-headers: build for linux-lts'
+    'linux-zen-headers: build for linux-zen'
+    'linux-hardened-headers: build for linux-hardened'
+    'limine-mkinitcpio-hook: regenerate Limine boot entries after a module rebuild'
+)
 provides=("$_repo")
 # The official DKMS packages would collide with the extracted source tree.
 conflicts=("$_repo" 'nvidia-580xx-dkms' 'nvidia-open-dkms')

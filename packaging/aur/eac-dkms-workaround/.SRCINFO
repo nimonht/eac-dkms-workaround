@@ -1,5 +1,5 @@
 pkgbase = eac-dkms-workaround
-	pkgdesc = DKMS NVIDIA module for the stock Arch kernel next to the CachyOS EAC kernel prebuilt NVIDIA module
+	pkgdesc = DKMS NVIDIA modules for non-CachyOS kernels next to the CachyOS EAC kernel
 	pkgver = 0.1.0
 	pkgrel = 1
 	url = https://github.com/nimonht/eac-dkms-workaround
@@ -12,9 +12,12 @@ pkgbase = eac-dkms-workaround
 	depends = dkms
 	depends = kmod
 	depends = libarchive
-	depends = linux-headers
 	depends = pacman>=7.1
 	depends = util-linux
+	optdepends = linux-headers: build for the stock linux kernel
+	optdepends = linux-lts-headers: build for linux-lts
+	optdepends = linux-zen-headers: build for linux-zen
+	optdepends = linux-hardened-headers: build for linux-hardened
 	optdepends = limine-mkinitcpio-hook: regenerate Limine boot entries after a module rebuild
 	conflicts = nvidia-580xx-dkms
 	conflicts = nvidia-open-dkms

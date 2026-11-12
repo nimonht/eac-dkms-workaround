@@ -90,14 +90,13 @@ reset_stubs() {
 t_eq "upstream_version strips pkgrel" "$(upstream_version 580.196.07-2)" 580.196.07
 t_eq "upstream_version strips epoch and pkgrel" "$(upstream_version 1:2.0-3)" 2.0
 
-# ---- kernel allowlist ----------------------------------------------------
-allowed() { [[ $1 =~ $KERNEL_ALLOW ]]; }
-t_true "allowlist: stock Arch kernel" allowed 7.2.15-arch1-1
-t_true "allowlist: stock Arch kernel, two-digit rel" allowed 6.12.10-arch12-3
-t_false "allowlist: linux-cachyos" allowed 7.3.3-1-cachyos
-t_false "allowlist: linux-cachyos-eac" allowed 7.3.3-2-cachyos-eac
-t_false "allowlist: linux-lts" allowed 6.12.5-1-lts
-t_false "allowlist: linux-zen" allowed 6.18.1-zen1-1-zen
+# ---- kernel flavors ------------------------------------------------------
+t_eq "flavor: stock linux" "$(flavor_suffix 7.2.15-arch1-1)" '-arch[0-9]+-[0-9]+'
+t_eq "flavor: linux-lts" "$(flavor_suffix 6.12.58-1-lts)" '-[0-9]+-lts'
+t_eq "flavor: linux-zen" "$(flavor_suffix 6.17.8-zen1-1-zen)" '-zen[0-9]+-[0-9]+-zen'
+t_eq "flavor: linux-hardened" "$(flavor_suffix 6.17.8-hardened1-1-hardened)" '-hardened[0-9]+-[0-9]+-hardened'
+t_eq "flavor: dots are escaped" "$(flavor_suffix 6.1.2-1.1-foo)" '-[0-9]+\.[0-9]+-foo'
+t_false "flavor: rejects a release without a suffix" flavor_suffix 6.12.0
 
 # ---- driver detection ----------------------------------------------------
 reset_stubs
@@ -125,10 +124,13 @@ for line in '[Trigger]' 'Type = Package' 'Operation = Install' 'Operation = Upgr
     'Target = nvidia-580xx-utils' 'Target = nvidia-utils' \
     'Target = eac-dkms-workaround' 'Target = eac-dkms-workaround-git' \
     '[Action]' 'When = PostTransaction' 'Exec = /opt/bin/eac-dkms-workaround sync --hook' \
+    'Type = Path' 'Target = usr/lib/modules/*/build/include/' \
+    'Target = usr/lib/modules/*/extramodules/nvidia.ko*' \
     'NeedsTargets' 'NetworkAccess = allowed'; do
     t_true "hook has: $line" grep -qxF -- "$line" <<<"$hook"
 done
-t_false "hook has no Remove trigger" grep -q 'Operation = Remove' <<<"$hook"
+t_eq "hook: Remove only in the path trigger" \
+    "$(awk '/^\[/ {sec=$0} /^Type =/ {type=$3} /^Operation = Remove/ {print type}' <<<"$hook")" Path
 
 # ---- managed source trees ------------------------------------------------
 reset_stubs
@@ -140,15 +142,71 @@ STUB_OWNED=("$SRC_ROOT/nvidia-3.0/dkms.conf")
 t_eq "managed_trees: only marked, unowned nvidia trees" "$(managed_trees)" "$SRC_ROOT/nvidia-1.0"
 t_eq "tree_version" "$(tree_version "$SRC_ROOT/nvidia-580.196.07")" 580.196.07
 
-# ---- eligible kernels ----------------------------------------------------
+# ---- kernels -------------------------------------------------------------
 MOD_ROOT=$FIX/modules
-mkdir -p "$MOD_ROOT"/7.2.15-arch1-1/{build/include,kernel} \
-    "$MOD_ROOT"/7.3.3-1-cachyos/{build/include,kernel} \
-    "$MOD_ROOT"/7.3.3-2-cachyos-eac/kernel \
-    "$MOD_ROOT"/7.2.14-arch1-1/kernel
+mkkernel() { # <release> [headers] [prebuilt]
+    mkdir -p "$MOD_ROOT/$1/kernel"
+    [[ ${2:-} == headers ]] && mkdir -p "$MOD_ROOT/$1/build/include"
+    if [[ ${3:-} == prebuilt ]]; then
+        mkdir -p "$MOD_ROOT/$1/extramodules"
+        touch "$MOD_ROOT/$1/extramodules/nvidia.ko.zst"
+    fi
+    return 0
+}
+mkkernel 7.2.15-arch1-1 headers
+mkkernel 6.12.58-1-lts headers
+mkkernel 6.17.8-zen1-1-zen headers
+mkkernel 7.3.3-1-cachyos headers prebuilt
+mkkernel 7.3.3-2-cachyos-eac '' prebuilt
+mkkernel 6.17.8-hardened1-1-hardened
+mkdir -p "$MOD_ROOT/7.2.14-arch1-1"  # leftover directory of a removed kernel
 echo linux >"$MOD_ROOT/7.2.15-arch1-1/pkgbase"
-t_eq "eligible_kernels: stock kernel with headers only" "$(eligible_kernels)" 7.2.15-arch1-1
+
+t_eq "installed_kernels: only directories with a kernel tree" \
+    "$(installed_kernels | LC_ALL=C sort | paste -sd' ')" \
+    "6.12.58-1-lts 6.17.8-hardened1-1-hardened 6.17.8-zen1-1-zen 7.2.15-arch1-1 7.3.3-1-cachyos 7.3.3-2-cachyos-eac"
+t_eq "eligible: headers, no prebuilt module, not EAC" \
+    "$(eligible_kernels | LC_ALL=C sort | paste -sd' ')" "6.12.58-1-lts 6.17.8-zen1-1-zen 7.2.15-arch1-1"
+t_eq "uncovered: no headers and no prebuilt module" "$(uncovered_kernels)" 6.17.8-hardened1-1-hardened
+t_true "is_eac_kernel: linux-cachyos-eac" is_eac_kernel 7.3.3-2-cachyos-eac
+t_false "is_eac_kernel: linux-cachyos" is_eac_kernel 7.3.3-1-cachyos
 t_eq "kernel_pkgbase reads pkgbase" "$(kernel_pkgbase 7.2.15-arch1-1)" linux
+
+regex=$(exclusive_regex 7.2.15-arch1-1 6.12.58-1-lts 6.17.8-zen1-1-zen)
+t_eq "exclusive_regex: one pattern per flavor" "$regex" '^[0-9]+(\.[0-9]+)*(-[0-9]+-lts|-arch[0-9]+-[0-9]+|-zen[0-9]+-[0-9]+-zen)$'
+matches() { [[ $1 =~ $regex ]]; }
+t_true "regex: next stock kernel" matches 7.3.1-arch1-1
+t_true "regex: next lts" matches 6.12.60-1-lts
+t_true "regex: next zen" matches 6.18.2-zen1-1-zen
+t_false "regex: linux-cachyos (prebuilt)" matches 7.3.3-1-cachyos
+t_false "regex: linux-cachyos-eac" matches 7.3.3-2-cachyos-eac
+t_false "regex: linux-cachyos-lts" matches 6.18.60-2-cachyos-lts
+t_false "regex: linux-hardened (not eligible)" matches 6.17.8-hardened1-1-hardened
+t_eq "exclusive_regex: matches nothing without kernels" "$(exclusive_regex)" '^$'
+mkkernel 7.2.9-arch1-1 '' prebuilt
+t_eq "exclusive_regex: exact releases when a flavor would hit a kernel with a prebuilt module" \
+    "$(exclusive_regex 7.2.15-arch1-1)" '^(7\.2\.15-arch1-1)$'
+rm -rf "$MOD_ROOT/7.2.9-arch1-1"
+
+# ---- the block in dkms.conf ----------------------------------------------
+conf=$FIX/dkms.conf
+printf 'PACKAGE_NAME="nvidia"\nPACKAGE_VERSION="1.0"\n\n\n' >"$conf"
+chmod 644 "$conf"
+set_exclusive "$conf" '^(a)$'
+t_eq "current_exclusive reads the block" "$(current_exclusive "$conf")" '^(a)$'
+set_exclusive "$conf" "$regex"
+t_eq "set_exclusive replaces the block" "$(current_exclusive "$conf")" "$regex"
+t_eq "set_exclusive leaves one assignment" "$(grep -c '^BUILD_EXCLUSIVE_KERNEL=' "$conf")" 1
+t_eq "set_exclusive keeps the rest, one blank line before the block" \
+    "$(head -n 4 "$conf")" "$(printf 'PACKAGE_NAME="nvidia"\nPACKAGE_VERSION="1.0"\n\n%s' "$BLOCK_BEGIN")"
+t_eq "set_exclusive keeps mode 644" "$(stat -c %a "$conf")" 644
+# How DKMS reads it: source dkms.conf, match the kernel release.
+conf_builds_for() {
+    # shellcheck source=/dev/null  # fixture created at runtime
+    (source "$1" && [[ $2 =~ $BUILD_EXCLUSIVE_KERNEL ]])
+}
+t_true "sourced dkms.conf: DKMS builds for the next lts" conf_builds_for "$conf" 6.12.60-1-lts
+t_false "sourced dkms.conf: DKMS skips linux-cachyos-eac" conf_builds_for "$conf" 7.3.3-2-cachyos-eac
 
 # ---- dkms status parsing -------------------------------------------------
 STUB_DKMS_STATUS='nvidia/580.196.07, 7.2.15-arch1-1, x86_64: installed'
@@ -160,6 +218,9 @@ t_eq "dkms_state: added" "$(dkms_state 580.196.07 7.2.15-arch1-1)" added
 STUB_DKMS_STATUS=''
 t_eq "dkms_state: unknown module" "$(dkms_state 580.196.07 7.2.15-arch1-1)" ''
 t_false "dkms_registered: unknown module" dkms_registered 580.196.07
+STUB_DKMS_STATUS=$'nvidia/580.196.07, 7.2.15-arch1-1, x86_64: installed\nnvidia/580.196.07, 7.3.3-1-cachyos, x86_64: built\nnvidia/580.196.07: added'
+t_eq "dkms_kernels: kernels with a build" "$(dkms_kernels 580.196.07 | paste -sd' ')" "7.2.15-arch1-1 7.3.3-1-cachyos"
+STUB_DKMS_STATUS=''
 
 t_eq "show_build_log: silent when DKMS left no log" "$(show_build_log 0.0.0 2>&1)" ''
 
@@ -175,12 +236,12 @@ make_fake_pkg() { # <out> <dir version> <PACKAGE_VERSION>
 make_fake_pkg "$FIX/good.pkg.tar.zst" 1.2.3 1.2.3
 TMP=$FIX/stage-good
 mkdir -p "$TMP"
-staged=$(stage_tree "$FIX/good.pkg.tar.zst" 1.2.3 1.2.3-4 2>/dev/null)
+staged=$(stage_tree "$FIX/good.pkg.tar.zst" 1.2.3 1.2.3-4 "$regex" 2>/dev/null)
 t_eq "stage_tree: returns the staged tree" "$staged" "$TMP/root/usr/src/nvidia-1.2.3"
 t_eq "stage_tree: marker holds pkgver-pkgrel" "$(cat "$staged/$MARKER" 2>/dev/null)" 1.2.3-4
 # shellcheck source=/dev/null  # fixture created at runtime
-t_eq "stage_tree: dkms.conf gets the kernel allowlist" \
-    "$( (source "$staged/dkms.conf" && printf '%s' "$BUILD_EXCLUSIVE_KERNEL") 2>/dev/null)" "$KERNEL_ALLOW"
+t_eq "stage_tree: dkms.conf gets the kernel block" \
+    "$( (source "$staged/dkms.conf" && printf '%s' "$BUILD_EXCLUSIVE_KERNEL") 2>/dev/null)" "$regex"
 # shellcheck source=/dev/null  # fixture created at runtime
 t_eq "stage_tree: rest of dkms.conf untouched" \
     "$( (source "$staged/dkms.conf" && printf '%s %s' "$PACKAGE_NAME" "$PACKAGE_VERSION") 2>/dev/null)" "nvidia 1.2.3"
@@ -189,10 +250,10 @@ t_false "stage_tree: extracts nothing outside usr/src" test -e "$TMP/root/usr/sh
 make_fake_pkg "$FIX/bad.pkg.tar.zst" 1.2.3 9.9.9
 TMP=$FIX/stage-bad
 mkdir -p "$TMP"
-t_false "stage_tree: rejects a PACKAGE_VERSION mismatch" stage_tree "$FIX/bad.pkg.tar.zst" 1.2.3 1.2.3-1 2>/dev/null
+t_false "stage_tree: rejects a PACKAGE_VERSION mismatch" stage_tree "$FIX/bad.pkg.tar.zst" 1.2.3 1.2.3-1 "$regex" 2>/dev/null
 TMP=$FIX/stage-missing
 mkdir -p "$TMP"
-t_false "stage_tree: rejects a package without that version" stage_tree "$FIX/good.pkg.tar.zst" 4.5.6 4.5.6-1 2>/dev/null
+t_false "stage_tree: rejects a package without that version" stage_tree "$FIX/good.pkg.tar.zst" 4.5.6 4.5.6-1 "$regex" 2>/dev/null
 
 # ---- initramfs regeneration decision -------------------------------------
 reset_stubs

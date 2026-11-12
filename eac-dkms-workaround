@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# eac-dkms-workaround: keep a DKMS-built NVIDIA module for the stock Arch
-# `linux` kernel while CachyOS's prebuilt EAC module
-# (linux-cachyos-eac-nvidia-580xx or linux-cachyos-eac-nvidia-open) is installed.
+# eac-dkms-workaround: keep DKMS-built NVIDIA modules for kernels without a
+# prebuilt module (linux, linux-lts, linux-zen, linux-hardened, ...) while
+# CachyOS's prebuilt EAC module (linux-cachyos-eac-nvidia-580xx or
+# linux-cachyos-eac-nvidia-open) is installed.
 #
 # The NVIDIA DKMS packages declare `Conflicts = NVIDIA-MODULE`, and the EAC
 # module packages provide NVIDIA-MODULE, so pacman refuses to keep both. Their
@@ -10,9 +11,11 @@
 # downloads it with pacman (signature checked), extracts only
 # /usr/src/nvidia-<ver>/ and registers that tree with DKMS.
 #
-# Kernel updates need nothing from this script: the official DKMS alpm hook
-# rebuilds every /usr/src/*/dkms.conf for an updated kernel. Driver updates are
-# handled by this script's pacman hook.
+# DKMS builds for every kernel that has headers and no prebuilt nvidia module,
+# except the EAC kernel. The tree's dkms.conf gets a BUILD_EXCLUSIVE_KERNEL
+# pattern for those kernel flavors, so the official DKMS alpm hook rebuilds them
+# on kernel updates. This script's pacman hook handles driver updates, and
+# kernels or prebuilt modules being added or removed.
 #
 # SPDX-License-Identifier: MIT
 
@@ -27,11 +30,10 @@ readonly -a DRIVERS=(
     'nvidia-utils nvidia-open-dkms'         # Turing and newer (GTX 16xx, RTX)
 )
 readonly MOD=nvidia
-# DKMS builds only for kernels whose release matches this regex: the stock Arch
-# kernel (e.g. 7.2.15-arch1-1). linux-cachyos and linux-cachyos-eac use
-# CachyOS's prebuilt linux-cachyos[-eac]-nvidia-* packages instead.
-readonly KERNEL_ALLOW='-arch[0-9]+-[0-9]+$'
 readonly MARKER=.eac-dkms-workaround
+# Lines around the block this script appends to the extracted dkms.conf.
+readonly BLOCK_BEGIN='# >>> eac-dkms-workaround'
+readonly BLOCK_END='# <<< eac-dkms-workaround'
 readonly STAGE_PARENT=/var/tmp
 # Not readonly, so the test suite can point them at fixture directories.
 SRC_ROOT=/usr/src
@@ -80,6 +82,15 @@ need_root() {
     fi
 }
 
+in_list() {
+    local x=$1 e
+    shift
+    for e in "$@"; do
+        [[ $e == "$x" ]] && return 0
+    done
+    return 1
+}
+
 # Serialize runs (hook vs. manual) with a lock on /usr/src; leaves no file.
 take_lock() {
     exec {LOCK_FD}<"$SRC_ROOT" || fail "cannot open $SRC_ROOT"
@@ -99,6 +110,8 @@ make_tmp() {
     # pacman downloads as its DownloadUser (alpm), which must reach the cache dir.
     chmod 755 "$TMP"
 }
+
+# ---- packages ---------------------------------------------------------------
 
 utils_packages() {
     local entry u d
@@ -157,6 +170,100 @@ dkms_is_orphan() {
     [[ -n $(pacman -Qqdt dkms 2>/dev/null) ]]
 }
 
+# ---- kernels ----------------------------------------------------------------
+
+# Installed kernels: every module directory with a kernel/ tree.
+installed_kernels() {
+    local d
+    for d in "$MOD_ROOT"/*/kernel/; do
+        d=${d%/kernel/}
+        printf '%s\n' "${d##*/}"
+    done
+}
+
+# The EAC kernel must only load its CachyOS-signed prebuilt module.
+is_eac_kernel() {
+    [[ $1 == *-eac ]]
+}
+
+has_headers() {
+    [[ -d $MOD_ROOT/$1/build/include ]]
+}
+
+# A package-shipped module (e.g. linux-cachyos-nvidia-580xx) lives in extramodules/.
+has_prebuilt_module() {
+    local f
+    for f in "$MOD_ROOT/$1/extramodules/$MOD".ko*; do
+        return 0
+    done
+    return 1
+}
+
+# Kernels DKMS builds for: headers installed, no prebuilt module, not EAC.
+eligible_kernels() {
+    local k
+    while read -r k; do
+        has_headers "$k" || continue
+        is_eac_kernel "$k" && continue
+        has_prebuilt_module "$k" && continue
+        printf '%s\n' "$k"
+    done < <(installed_kernels)
+}
+
+kernel_pkgbase() {
+    local k=$1 pb=
+    [[ -f $MOD_ROOT/$k/pkgbase ]] && pb=$(<"$MOD_ROOT/$k/pkgbase")
+    [[ -n $pb ]] || pb=$(pacman -Qqo "$MOD_ROOT/$k/modules.builtin" 2>/dev/null)
+    printf '%s\n' "$pb"
+}
+
+# The part of a kernel release that names its flavor, as a regex that matches
+# any version of it: 6.12.58-1-lts -> -[0-9]+-lts, 7.2.15-arch1-1 ->
+# -arch[0-9]+-[0-9]+, 6.17.8-zen1-1-zen -> -zen[0-9]+-[0-9]+-zen.
+flavor_suffix() {
+    [[ $1 =~ ^[0-9]+(\.[0-9]+)*(-[A-Za-z0-9._+-]+)$ ]] || return 1
+    sed -E 's/[.+]/\\&/g; s/[0-9]+/[0-9]+/g' <<<"${BASH_REMATCH[2]}"
+}
+
+# BUILD_EXCLUSIVE_KERNEL regex for the given (eligible) kernels: their flavors at
+# any version, so the official DKMS hook also builds after kernel updates. Falls
+# back to the exact releases if a flavor pattern would also match an installed
+# kernel that must not be built for. '^$' (matches nothing) for no kernels.
+exclusive_regex() {
+    local k s regex=''
+    local -a suffixes=()
+    (( $# )) || { printf '%s\n' '^$'; return 0; }
+    for k in "$@"; do
+        s=$(flavor_suffix "$k") || { suffixes=(); break; }
+        suffixes+=("$s")
+    done
+    if (( ${#suffixes[@]} )); then
+        regex="^[0-9]+(\\.[0-9]+)*($(printf '%s\n' "${suffixes[@]}" | LC_ALL=C sort -u | paste -sd'|'))\$"
+        while read -r k; do
+            in_list "$k" "$@" && continue
+            if [[ $k =~ $regex ]]; then
+                regex=''
+                break
+            fi
+        done < <(installed_kernels)
+    fi
+    if [[ -z $regex ]]; then
+        regex="^($(printf '%s\n' "$@" | sed -E 's/[.+]/\\&/g' | LC_ALL=C sort -u | paste -sd'|'))\$"
+    fi
+    printf '%s\n' "$regex"
+}
+
+# Installed kernels (not EAC) left without any nvidia module source: no headers
+# for DKMS and no prebuilt package.
+uncovered_kernels() {
+    local k
+    while read -r k; do
+        is_eac_kernel "$k" || has_headers "$k" || has_prebuilt_module "$k" || printf '%s\n' "$k"
+    done < <(installed_kernels)
+}
+
+# ---- the managed source tree ------------------------------------------------
+
 # /usr/src/nvidia-* trees managed by this script: marked and owned by no package.
 managed_trees() {
     local d
@@ -172,24 +279,34 @@ tree_version() {
     printf '%s\n' "${1##*/"$MOD"-}"
 }
 
-# Kernels DKMS should build for: headers present and release matches KERNEL_ALLOW.
-eligible_kernels() {
-    local d k
-    for d in "$MOD_ROOT"/*/; do
-        k=${d%/}
-        k=${k##*/}
-        [[ -d $d/build/include && -d $d/kernel ]] || continue
-        [[ $k =~ $KERNEL_ALLOW ]] || continue
-        printf '%s\n' "$k"
-    done
+# The BUILD_EXCLUSIVE_KERNEL regex in this script's block of a dkms.conf.
+current_exclusive() {
+    [[ -f $1 ]] || return 0
+    sed -n "/^$BLOCK_BEGIN\$/,/^$BLOCK_END\$/s/^BUILD_EXCLUSIVE_KERNEL='\\(.*\\)'\$/\\1/p" "$1"
 }
 
-kernel_pkgbase() {
-    local k=$1 pb=
-    [[ -f $MOD_ROOT/$k/pkgbase ]] && pb=$(<"$MOD_ROOT/$k/pkgbase")
-    [[ -n $pb ]] || pb=$(pacman -Qqo "$MOD_ROOT/$k/modules.builtin" 2>/dev/null)
-    printf '%s\n' "$pb"
+# Replace this script's block at the end of a dkms.conf.
+set_exclusive() {
+    local conf=$1 regex=$2 tmp
+    tmp=$(mktemp "$conf.XXXXXX") || return 1
+    {
+        # Everything before our block, without trailing blank lines.
+        awk -v b="$BLOCK_BEGIN" '
+            $0 == b { exit }
+            /^[[:space:]]*$/ { blank = blank $0 "\n"; next }
+            { printf "%s", blank; blank = ""; print }
+        ' "$conf"
+        echo
+        echo "$BLOCK_BEGIN"
+        echo "# Managed by $ME: build only for kernels without a prebuilt module."
+        echo "BUILD_EXCLUSIVE_KERNEL='$regex'"
+        echo "$BLOCK_END"
+    } >"$tmp" && chmod 644 "$tmp" && mv -f -- "$tmp" "$conf" && return 0
+    rm -f -- "$tmp"
+    return 1
 }
+
+# ---- dkms -------------------------------------------------------------------
 
 dkms_registered() {
     [[ -n $(dkms status -m "$MOD" -v "$1" 2>/dev/null) ]]
@@ -203,61 +320,17 @@ dkms_state() {
     return 0
 }
 
+# Kernels nvidia/<ver> is built or installed for.
+dkms_kernels() {
+    local line re="^$MOD/$1, ([^,]+), [^:]+: (built|installed)"
+    while read -r line; do
+        [[ $line =~ $re ]] && printf '%s\n' "${BASH_REMATCH[1]}"
+    done < <(dkms status -m "$MOD" -v "$1" 2>/dev/null)
+}
+
 dkms_remove_version() {
     dkms_registered "$1" || return 0
     run dkms remove "$MOD/$1" --all
-}
-
-# Download DKMS_PKG with pacman itself into $TMP/cache and print its path.
-# A throwaway dbpath (copy of the sync DBs, empty local DB) gives it its own
-# lock, so this also works inside a pacman hook. pacman verifies the signature
-# (SigLevel = Required) and fails over between mirrors.
-fetch_pkg() {
-    local want=$1 f
-    mkdir -p "$TMP/db" "$TMP/cache" || return 1
-    cp -a /var/lib/pacman/sync "$TMP/db/" || return 1
-    log "downloading $DKMS_PKG $want with pacman"
-    pacman -Sddw --noconfirm --noprogressbar --dbpath "$TMP/db" \
-        --cachedir "$TMP/cache" --logfile /dev/null "$DKMS_PKG" >&2 || return 1
-    for f in "$TMP/cache/$DKMS_PKG-$want"-*.pkg.tar.*; do
-        [[ $f == *.sig ]] && continue
-        printf '%s\n' "$f"
-        return 0
-    done
-    err "downloaded package not found in $TMP/cache"
-    return 1
-}
-
-# Extract usr/src/nvidia-<ver> into $TMP/root, check it, append the kernel
-# allowlist and write the marker. Prints the staged tree path.
-stage_tree() {
-    local pkg=$1 ver=$2 full=$3 t pv
-    mkdir -p "$TMP/root" || return 1
-    bsdtar -xf "$pkg" -C "$TMP/root" "usr/src/$MOD-$ver" || return 1
-    t=$TMP/root/usr/src/$MOD-$ver
-    if [[ ! -f $t/dkms.conf ]]; then
-        err "package has no usr/src/$MOD-$ver/dkms.conf"
-        return 1
-    fi
-    pv=$(grep -m1 '^PACKAGE_VERSION=' "$t/dkms.conf")
-    pv=${pv#PACKAGE_VERSION=}
-    pv=${pv//\"/}
-    pv=${pv//\'/}
-    if [[ $pv != "$ver" ]]; then
-        err "dkms.conf PACKAGE_VERSION is '$pv', expected '$ver'"
-        return 1
-    fi
-    if grep -q '^[[:space:]]*BUILD_EXCLUSIVE_KERNEL=' "$t/dkms.conf"; then
-        warn "upstream dkms.conf now sets BUILD_EXCLUSIVE_KERNEL; $ME overrides it"
-    fi
-    {
-        echo
-        echo "# Added by $ME: build only for the stock Arch kernel."
-        echo "# linux-cachyos and linux-cachyos-eac use CachyOS's prebuilt module packages."
-        echo "BUILD_EXCLUSIVE_KERNEL='$KERNEL_ALLOW'"
-    } >>"$t/dkms.conf" || return 1
-    printf '%s\n' "$full" >"$t/$MARKER" || return 1
-    printf '%s\n' "$t"
 }
 
 show_build_log() {
@@ -291,6 +364,73 @@ install_for() {
     done
 }
 
+# Remove managed trees other than $1, with their DKMS entries.
+remove_other_trees() {
+    local old
+    local -a trees=()
+    mapfile -t trees < <(managed_trees)
+    for old in "${trees[@]}"; do
+        [[ $old == "$1" ]] && continue
+        log "removing old $old"
+        if dkms_remove_version "$(tree_version "$old")"; then
+            rm -rf -- "$old"
+        else
+            warn "dkms remove failed for $old; left it in place"
+        fi
+    done
+}
+
+# ---- download ---------------------------------------------------------------
+
+# Download DKMS_PKG with pacman itself into $TMP/cache and print its path.
+# A throwaway dbpath (copy of the sync DBs, empty local DB) gives it its own
+# lock, so this also works inside a pacman hook. pacman verifies the signature
+# (SigLevel = Required) and fails over between mirrors.
+fetch_pkg() {
+    local want=$1 f
+    mkdir -p "$TMP/db" "$TMP/cache" || return 1
+    cp -a /var/lib/pacman/sync "$TMP/db/" || return 1
+    log "downloading $DKMS_PKG $want with pacman"
+    pacman -Sddw --noconfirm --noprogressbar --dbpath "$TMP/db" \
+        --cachedir "$TMP/cache" --logfile /dev/null "$DKMS_PKG" >&2 || return 1
+    for f in "$TMP/cache/$DKMS_PKG-$want"-*.pkg.tar.*; do
+        [[ $f == *.sig ]] && continue
+        printf '%s\n' "$f"
+        return 0
+    done
+    err "downloaded package not found in $TMP/cache"
+    return 1
+}
+
+# Extract usr/src/nvidia-<ver> into $TMP/root, check it, add the kernel block
+# and the marker. Prints the staged tree path.
+stage_tree() {
+    local pkg=$1 ver=$2 full=$3 regex=$4 t pv
+    mkdir -p "$TMP/root" || return 1
+    bsdtar -xf "$pkg" -C "$TMP/root" "usr/src/$MOD-$ver" || return 1
+    t=$TMP/root/usr/src/$MOD-$ver
+    if [[ ! -f $t/dkms.conf ]]; then
+        err "package has no usr/src/$MOD-$ver/dkms.conf"
+        return 1
+    fi
+    pv=$(grep -m1 '^PACKAGE_VERSION=' "$t/dkms.conf")
+    pv=${pv#PACKAGE_VERSION=}
+    pv=${pv//\"/}
+    pv=${pv//\'/}
+    if [[ $pv != "$ver" ]]; then
+        err "dkms.conf PACKAGE_VERSION is '$pv', expected '$ver'"
+        return 1
+    fi
+    if grep -q '^[[:space:]]*BUILD_EXCLUSIVE_KERNEL=' "$t/dkms.conf"; then
+        warn "upstream dkms.conf now sets BUILD_EXCLUSIVE_KERNEL; $ME overrides it"
+    fi
+    set_exclusive "$t/dkms.conf" "$regex" || return 1
+    printf '%s\n' "$full" >"$t/$MARKER" || return 1
+    printf '%s\n' "$t"
+}
+
+# ---- initramfs --------------------------------------------------------------
+
 utils_ships_firmware() {
     local f
     while read -r f; do
@@ -299,19 +439,11 @@ utils_ships_firmware() {
     return 1
 }
 
-in_hook_targets() {
-    local t
-    for t in "${HOOK_TARGETS[@]}"; do
-        [[ $t == "$1" ]] && return 0
-    done
-    return 1
-}
-
 # chwd puts nvidia into every initramfs (/etc/mkinitcpio.conf.d/10-chwd.conf),
 # so a kernel whose module changed needs a new initramfs.
 regen_initramfs() {
     (( $# )) || return 0
-    if (( HOOK_MODE )) && in_hook_targets "$UTILS_PKG" && utils_ships_firmware; then
+    if (( HOOK_MODE )) && in_list "$UTILS_PKG" "${HOOK_TARGETS[@]}" && utils_ships_firmware; then
         log "initramfs: 90-mkinitcpio-install runs next ($UTILS_PKG firmware changed) and rebuilds all kernels"
         return 0
     fi
@@ -320,7 +452,7 @@ regen_initramfs() {
     for k in "$@"; do
         pb=$(kernel_pkgbase "$k")
         if [[ -n $pb ]]; then
-            pkgs+=("$pb")
+            in_list "$pb" "${pkgs[@]}" || pkgs+=("$pb")
         else
             warn "no package owns kernel $k; regenerate its initramfs yourself"
         fi
@@ -341,10 +473,12 @@ regen_initramfs() {
     fi
 }
 
+# ---- commands ---------------------------------------------------------------
+
 cmd_sync() {
     if [[ ${1:-} == --hook ]]; then
         HOOK_MODE=1
-        # The hook uses NeedsTargets: pacman passes the triggering package names.
+        # The hook uses NeedsTargets: pacman passes the triggering targets.
         [[ -t 0 ]] || mapfile -t HOOK_TARGETS
     fi
     need_root sync
@@ -356,22 +490,11 @@ cmd_sync() {
     fi
     pacman -Q dkms &>/dev/null || fail "dkms is not installed. Run: sudo pacman -S --needed --asexplicit dkms"
 
-    local want avail ver tree cur k pkg staged old missing fresh=0
+    local want ver avail full tree cur regex k pkg staged missing fresh=0
+    local -a kernels=() extra=()
     want=$(pkg_version "$UTILS_PKG") || fail "$UTILS_PKG is not installed"
-    avail=$(repo_version "$DKMS_PKG") || fail "$DKMS_PKG is not in the sync databases"
-    ver=$(upstream_version "$avail")
-    # The module must match the userspace driver version; pkgrel may differ.
-    if [[ $ver != "$(upstream_version "$want")" ]]; then
-        fail "$UTILS_PKG $want is installed but the repo has $DKMS_PKG $avail (stale sync DB, or published at different times). Retry after the next pacman -Syu"
-    fi
+    ver=$(upstream_version "$want")
     tree=$SRC_ROOT/$MOD-$ver
-
-    local -a kernels=() trees=()
-    mapfile -t kernels < <(eligible_kernels)
-    if (( ${#kernels[@]} == 0 )); then
-        log "no installed kernel with headers matches $KERNEL_ALLOW; nothing to build"
-        return 0
-    fi
 
     cur=
     if [[ -d $tree ]]; then
@@ -381,34 +504,72 @@ cmd_sync() {
         cur=$(<"$tree/$MARKER")
     fi
 
-    if [[ $cur == "$avail" ]]; then
-        missing=0
-        for k in "${kernels[@]}"; do
-            [[ $(dkms_state "$ver" "$k") == installed ]] || missing=1
-        done
-        if (( ! missing )) && [[ $(managed_trees) == "$tree" ]]; then
-            log "$DKMS_PKG $avail is up to date for: ${kernels[*]}"
-            return 0
-        fi
+    mapfile -t kernels < <(eligible_kernels)
+    regex=$(exclusive_regex "${kernels[@]}")
+    for k in $(dkms_kernels "$ver"); do
+        in_list "$k" "${kernels[@]}" || extra+=("$k")
+    done
+
+    if (( ${#kernels[@]} == 0 )) && [[ -z $cur ]]; then
+        remove_other_trees ''
+        log "no kernel needs a DKMS build (each one has a prebuilt module or no headers)"
+        warn_uncovered
+        return 0
+    fi
+
+    # The DKMS package release to use: the repo's if it is for this driver
+    # version, else the tree already extracted for it (repo ahead or behind).
+    avail=$(repo_version "$DKMS_PKG") || avail=
+    if [[ -n $avail && $(upstream_version "$avail") == "$ver" ]]; then
+        full=$avail
+    elif [[ -n $cur ]]; then
+        full=$cur
+    else
+        fail "$UTILS_PKG $want needs $DKMS_PKG $ver, but the repo has ${avail:-no $DKMS_PKG} (stale sync DB, or published at different times). Retry after the next pacman -Syu"
+    fi
+
+    missing=0
+    for k in "${kernels[@]}"; do
+        [[ $(dkms_state "$ver" "$k") == installed ]] || missing=1
+    done
+    if [[ $cur == "$full" ]] && (( ! missing && ${#extra[@]} == 0 )) \
+        && [[ $(current_exclusive "$tree/dkms.conf") == "$regex" && $(managed_trees) == "$tree" ]]; then
+        log "$DKMS_PKG $full is up to date for: ${kernels[*]:-no kernel}"
+        warn_uncovered
+        return 0
     fi
 
     # Download and stage before touching anything, so a failed download (the
     # likeliest failure) leaves the installed module as it was.
-    if [[ $cur != "$avail" ]]; then
+    if [[ $cur != "$full" ]]; then
         make_tmp || fail "cannot create a staging directory in $STAGE_PARENT"
-        pkg=$(fetch_pkg "$avail") || fail "download of $DKMS_PKG $avail failed"
-        staged=$(stage_tree "$pkg" "$ver" "$avail") || fail "extracting $DKMS_PKG failed"
+        pkg=$(fetch_pkg "$full") || fail "download of $DKMS_PKG $full failed"
+        staged=$(stage_tree "$pkg" "$ver" "$full" "$regex") || fail "extracting $DKMS_PKG failed"
         if [[ -n $cur ]]; then
             # Same pkgver, new pkgrel: DKMS can't hold both, so the old one goes first.
-            log "replacing $tree ($cur -> $avail)"
+            log "replacing $tree ($cur -> $full)"
             dkms_remove_version "$ver" || fail "dkms remove $MOD/$ver failed"
             rm -rf -- "$tree"
+            extra=()
         fi
         mv -T -- "$staged" "$tree" || fail "cannot move the source tree to $tree"
         cleanup
         fresh=1
         log "extracted $tree"
+    elif [[ $(current_exclusive "$tree/dkms.conf") != "$regex" ]]; then
+        set_exclusive "$tree/dkms.conf" "$regex" || fail "cannot update $tree/dkms.conf"
     fi
+    log "DKMS builds for kernels matching: $regex"
+
+    REBUILT=()
+    # Kernels that stopped qualifying (e.g. got a prebuilt module) lose our build.
+    for k in "${extra[@]}"; do
+        if run dkms remove "$MOD/$ver" -k "$k"; then
+            [[ -d $MOD_ROOT/$k/kernel ]] && REBUILT+=("$k")
+        else
+            warn "dkms remove $MOD/$ver -k $k failed"
+        fi
+    done
 
     # Build first; only swap out the old version once the new one built.
     if ! build_for "$ver" "${kernels[@]}"; then
@@ -420,23 +581,20 @@ cmd_sync() {
         fi
         fail "dkms build of $MOD/$ver failed"
     fi
-
-    mapfile -t trees < <(managed_trees)
-    for old in "${trees[@]}"; do
-        [[ $old == "$tree" ]] && continue
-        log "removing old $old"
-        if dkms_remove_version "$(tree_version "$old")"; then
-            rm -rf -- "$old"
-        else
-            warn "dkms remove failed for $old; left it in place"
-        fi
-    done
-
-    REBUILT=()
+    remove_other_trees "$tree"
     install_for "$ver" "${kernels[@]}" || fail "dkms install of $MOD/$ver failed"
-    log "$DKMS_PKG $avail installed for: ${kernels[*]}"
+    log "$DKMS_PKG $full installed for: ${kernels[*]:-no kernel}"
     regen_initramfs "${REBUILT[@]}" || warn "check the initramfs, then: sudo limine-mkinitcpio"
+    warn_uncovered
     return 0
+}
+
+warn_uncovered() {
+    local k pb
+    while read -r k; do
+        pb=$(kernel_pkgbase "$k")
+        warn "kernel $k has no nvidia module: install ${pb:-its}-headers so DKMS can build for it"
+    done < <(uncovered_kernels)
 }
 
 # Remove the managed source trees and their DKMS entries. Keeps script and hook.
@@ -461,11 +619,11 @@ after_clean_notes() {
     local dkms_pkg='the official NVIDIA DKMS package'
     detect_driver && dkms_pkg=$DKMS_PKG
     log "notes:"
-    log "  - the stock 'linux' kernel now has no nvidia module, so its initramfs can't be built"
-    log "    (chwd adds nvidia to it): install $dkms_pkg before the next kernel update"
+    log "  - kernels without a prebuilt module now have no nvidia module, so their initramfs"
+    log "    can't be built (chwd adds nvidia to it): install $dkms_pkg before the next kernel update"
     log "  - dkms stays installed ($dkms_pkg needs it), and so does DKMS's signing key in /var/lib/dkms"
-    log "  - with $dkms_pkg installed, DKMS also builds for other kernels with headers (e.g."
-    log "    linux-cachyos), overriding their prebuilt linux-cachyos-nvidia-* module: keep only one"
+    log "  - with $dkms_pkg installed, DKMS builds for every kernel with headers, also those with a"
+    log "    prebuilt linux-cachyos-nvidia-* module, which it then overrides: keep only one of the two"
 }
 
 cmd_clean() {
@@ -478,17 +636,25 @@ cmd_clean() {
 print_hook() {
     local exec=$1
     cat <<EOF
-# pacman hook of $ME: rebuild the DKMS NVIDIA module for the stock Arch kernel
-# after an NVIDIA driver update, and when $ME itself is installed or upgraded.
+# pacman hook of $ME: keep the DKMS NVIDIA module in sync with the
+# NVIDIA driver and with the installed kernels and prebuilt modules.
 [Trigger]
+Type = Package
 Operation = Install
 Operation = Upgrade
-Type = Package
 $(utils_packages | sed 's/^/Target = /')
 $(printf 'Target = %s\n' "${PKG_NAMES[@]}")
 
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/build/include/
+Target = usr/lib/modules/*/extramodules/$MOD.ko*
+
 [Action]
-Description = Syncing NVIDIA DKMS source for the stock Arch kernel ($ME)...
+Description = Syncing NVIDIA DKMS modules for kernels without a prebuilt module ($ME)...
 When = PostTransaction
 Exec = $exec sync --hook
 NeedsTargets
@@ -560,7 +726,7 @@ cmd_uninstall() {
 }
 
 cmd_status() {
-    local want='' avail='' ver='' pkg t m d k pb path kind mver conf c n problems=0
+    local want='' avail='' ver='' pkg t m k pb path kind mver conf c n regex problems=0
     local -a active=() trees=()
 
     echo "== $ME status"
@@ -571,7 +737,7 @@ cmd_status() {
         printf '  %-26s %s\n' "$UTILS_PKG" "$want"
         printf '  %-26s %s\n' "$DKMS_PKG (repo)" "${avail:-not in sync DB}"
         if [[ -n $avail && $(upstream_version "$avail") != "$ver" ]]; then
-            echo "  !! repo $DKMS_PKG is for driver $(upstream_version "$avail"), userspace is $ver (sync refuses until they match)"
+            echo "  !! repo $DKMS_PKG is for driver $(upstream_version "$avail"), userspace is $ver (update both with pacman -Syu)"
             (( problems++ ))
         fi
     else
@@ -608,17 +774,17 @@ cmd_status() {
 
     echo "== managed source trees"
     mapfile -t trees < <(managed_trees)
-    if (( ${#trees[@]} == 0 )); then
-        echo "  none"
-    fi
+    (( ${#trees[@]} )) || echo "  none"
     for t in "${trees[@]}"; do
         m=$(<"$t/$MARKER")
-        if [[ -n $avail && $m == "$avail" ]]; then
-            echo "  $t ($m, current)"
+        if [[ $(upstream_version "$m") == "$ver" ]]; then
+            echo "  $t ($m, matches the driver)"
         else
-            echo "  $t ($m) !! repo has ${DKMS_PKG:-?} ${avail:-?}; run: sudo $ME sync"
+            echo "  $t ($m) !! driver is ${ver:-not installed}; run: sudo $ME sync"
             (( problems++ ))
         fi
+        regex=$(current_exclusive "$t/dkms.conf")
+        echo "    builds for kernels matching: ${regex:-?}"
     done
 
     echo "== dkms status"
@@ -627,16 +793,21 @@ cmd_status() {
     fi
 
     echo "== nvidia module per kernel"
-    for d in "$MOD_ROOT"/*/; do
-        [[ -f $d/modules.builtin ]] || continue
-        k=${d%/}
-        k=${k##*/}
+    while read -r k; do
         pb=$(kernel_pkgbase "$k")
         path=$(modinfo -k "$k" -n "$MOD" 2>/dev/null)
         case $path in
             */updates/dkms/*) kind=dkms ;;
             */extramodules/*) kind=prebuilt ;;
-            '') kind="MISSING: mkinitcpio fails for this kernel and limine keeps a stale boot entry"
+            '')
+                if is_eac_kernel "$k"; then
+                    kind="MISSING: install its linux-cachyos-eac-nvidia-* package"
+                elif ! has_headers "$k"; then
+                    kind="MISSING: install ${pb:-its}-headers so DKMS can build for it"
+                else
+                    kind="MISSING: run sudo $ME sync"
+                fi
+                kind+=" (mkinitcpio fails for this kernel and limine keeps a stale boot entry)"
                 (( problems++ )) ;;
             *) kind="other: $path" ;;
         esac
@@ -649,16 +820,16 @@ cmd_status() {
                 kind+=" ($mver)"
             fi
             n=0
-            for t in "$d"updates/dkms/"$MOD".ko* "$d"extramodules/"$MOD".ko*; do
+            for t in "$MOD_ROOT/$k/updates/dkms/$MOD".ko* "$MOD_ROOT/$k/extramodules/$MOD".ko*; do
                 (( n++ ))
             done
             if (( n > 1 )); then
-                kind+=" !! DUPLICATE: both a DKMS and a prebuilt nvidia.ko"
+                kind+=" !! DUPLICATE: both a DKMS and a prebuilt nvidia.ko; run: sudo $ME sync"
                 (( problems++ ))
             fi
         fi
         printf '  %-24s %-20s %s\n' "$k" "${pb:-?}" "$kind"
-    done
+    done < <(installed_kernels)
 
     if pacman -Q linux-cachyos-eac-headers &>/dev/null; then
         echo "  !! linux-cachyos-eac-headers is installed; remove it, the EAC kernel must only use the prebuilt module"
@@ -713,14 +884,14 @@ usage: $ME <command>
 
   status      show what the workaround manages and check for problems
   sync        make the DKMS nvidia source match the installed NVIDIA driver and
-              build it for the stock Arch kernel (--hook: used by the pacman
-              hook, always exits 0)
+              build it for every kernel that has headers and no prebuilt module
+              (--hook: used by the pacman hook, always exits 0)
   clean       remove the managed source trees and their DKMS entries
   fetch-test  download and signature-check the DKMS package only (diagnostic)
   print-hook <path>
               print the pacman hook, with Exec pointing at <path> (packaging)
 
-Manual install (not needed when installed from the AUR package):
+Manual install (not needed when installed as a package):
   install     copy this script to $SELF_DEST, write $HOOK_DEST, then sync
   uninstall   clean, then remove that script and hook
 

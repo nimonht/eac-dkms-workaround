@@ -7,11 +7,11 @@ _manual_install_leftovers() {
 }
 
 post_install() {
-    echo '==> eac-dkms-workaround: its pacman hook builds the NVIDIA DKMS module for the'
-    echo '    stock Arch kernel at the end of this transaction. Check the result with:'
+    echo '==> eac-dkms-workaround: its pacman hook builds the NVIDIA DKMS module, at the'
+    echo '    end of this transaction, for every kernel that has headers and no prebuilt'
+    echo '    module (linux, linux-lts, linux-zen, ...). Install <kernel>-headers for'
+    echo '    each such kernel. Check the result with:'
     echo '      eac-dkms-workaround status'
-    echo '    linux-cachyos users: also install linux-cachyos-nvidia-580xx or'
-    echo '    linux-cachyos-nvidia-open (prebuilt module, matching your driver line).'
     _manual_install_leftovers
 }
 
