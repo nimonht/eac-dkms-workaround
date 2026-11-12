@@ -35,8 +35,8 @@ The driver line is picked from the installed userspace package.
 
 | Userspace package | DKMS source used | EAC module | GPUs | Tested |
 |---|---|---|---|---|
-| `nvidia-580xx-utils` | `nvidia-580xx-dkms` | `linux-cachyos-eac-nvidia-580xx` | Maxwell, Pascal, Volta (GTX 9xx/10xx) | yes (GTX 1050) |
-| `nvidia-utils` | `nvidia-open-dkms` | `linux-cachyos-eac-nvidia-open` | Turing and newer (GTX 16xx, RTX) | detection only; same code path, not run on RTX hardware |
+| `nvidia-580xx-utils` | `nvidia-580xx-dkms` | `linux-cachyos-eac-nvidia-580xx` | Maxwell, Pascal, Volta (GTX 9xx/10xx) | yes |
+| `nvidia-utils` | `nvidia-open-dkms` | `linux-cachyos-eac-nvidia-open` | Turing and newer (GTX 16xx, RTX) | yes |
 
 ## Requirements
 
