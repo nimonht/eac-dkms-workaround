@@ -263,6 +263,7 @@ stage_tree() {
 show_build_log() {
     local f
     for f in /var/lib/dkms/"$MOD"/"$1"/build/make.log /var/lib/dkms/"$MOD"/"$1"/*/*/log/make.log; do
+        [[ -f $f ]] || continue
         err "last lines of $f:"
         tail -n 40 -- "$f" >&2
     done

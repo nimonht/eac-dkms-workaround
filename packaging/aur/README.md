@@ -31,3 +31,7 @@ Each directory is the content of one AUR git repository: `PKGBUILD`, `.SRCINFO` 
    Do the same for `eac-dkms-workaround-git`. It only needs a push when its `PKGBUILD` changes.
 
 The first push to a new AUR package name creates that package.
+
+## namcap
+
+namcap reports nothing for the PKGBUILDs. On the built package it prints `Dependency included, but may not be needed` for every runtime dependency. Those warnings are false positives: namcap only detects dependencies through linked libraries, and this package is a shell script that calls `dkms`, `pacman`, `modinfo` (kmod), `bsdtar` (libarchive), `flock` (util-linux) and coreutils, and builds against `linux-headers`.

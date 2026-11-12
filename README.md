@@ -99,9 +99,46 @@ Install the new driver line's packages (`nvidia-utils`, `linux-cachyos-eac-nvidi
 - `KERNEL_ALLOW` (`-arch[0-9]+-[0-9]+$`) matches only the stock `linux` kernel. To cover `linux-lts` or `linux-zen` as well, edit the regex.
 - If an NVIDIA driver fails to compile against a new Arch kernel, that kernel's initramfs build fails and Limine keeps its old entry. `status` shows the kernel as `MISSING`. The official DKMS package has the same risk.
 
+## Testing
+
+### Offline tests
+
+`make check test` runs the offline suite. It needs no root, no network and no NVIDIA hardware.
+- `make check` runs `bash -n` and shellcheck over the script, the tests and the `.install` file.
+- `make test` runs `tests/run.sh`: 47 tests that replace pacman, dkms and limine-mkinitcpio with stubs and use fixture directories.
+- The tests cover version handling, the kernel allowlist, driver detection, the hook's content, which source trees count as managed, `dkms status` parsing, extracting the source from a package, and when the initramfs is regenerated.
+
+The PKGBUILDs run the same targets in `check()`. CI (`.github/workflows/ci.yml`) also runs namcap, `make srcinfo-check` and a full `makepkg` build in an Arch container.
+
+### Tested on real hardware
+
+Tested on a GTX 1050 (Pascal) with `nvidia-580xx` 580.196.07, `linux` 7.2.15, `linux-cachyos` and `linux-cachyos-eac` 7.3.3, Limine with Secure Boot, pacman 7.1 and dkms 3.4.4. Every scenario below went through real pacman transactions:
+
+| Scenario | Result |
+|---|---|
+| Package install | The hook downloads the source with pacman (signature checked), then builds, installs and regenerates the stock kernel's initramfs |
+| Driver version change (580.196.06 → 580.196.07, simulated) | The hook builds the new version while the old one stays installed, then removes the old one. mkinitcpio rebuilds all three kernels without errors |
+| Driver pkgrel change | Replaced and rebuilt through the hook |
+| `linux-headers` reinstall | The official DKMS hook rebuilds for `linux` |
+| `linux-cachyos-headers` reinstall | No build attempted, because of `BUILD_EXCLUSIVE_KERNEL` |
+| Download fails (all mirrors unreachable) | Nothing changed. The installed module stays, no files are left behind, and in hook mode `sync` exits 0 with a retry hint |
+| New driver fails to compile | The new tree is rolled back and the old module stays installed |
+| Repeat `sync`, or driver reinstall at the same version | Does nothing |
+| `pacman -R`, then reinstall | `pre_remove` removes every tree and DKMS entry it created; the reinstall rebuilds |
+| EAC boot files | `eac-status` passes; the CachyOS signatures are untouched |
+
+Not covered yet: the `nvidia-utils` / `nvidia-open-dkms` line on Turing or newer hardware (only unit-tested), and a real upstream driver release.
+
+## Notes for CachyOS maintainers
+
+- **The conflict:** `nvidia-580xx-dkms` and `nvidia-open-dkms` have `conflicts=(NVIDIA-MODULE …)`, and `linux-cachyos-eac-nvidia-580xx` / `-open` provide `NVIDIA-MODULE`. So once the EAC kernel's module is installed, no DKMS NVIDIA module can be used for kernels CachyOS doesn't prebuild modules for, such as stock `linux` or a custom kernel.
+- **Why the conflict is there:** a DKMS build would shadow a prebuilt module, because depmod searches `updates` before `extramodules`. This package avoids that by giving DKMS an allowlist of kernel releases (`BUILD_EXCLUSIVE_KERNEL`). It never builds for kernels that have prebuilt modules.
+- **What it changes on the system:** apart from its own packaged files, only marked, package-unowned trees under `/usr/src/nvidia-*` and their DKMS entries. Package-owned files are never modified.
+- **When it becomes unnecessary:** once a DKMS package can be installed alongside the EAC module, this package isn't needed. `status` detects that case, and removing the package cleans up first.
+
 ## Packaging
 
-`make DESTDIR=… install` installs the script to `/usr/bin` and the hook to `/usr/share/libalpm/hooks`. `make check` runs the lint checks.
+`make DESTDIR=… install` installs the script to `/usr/bin` and the hook to `/usr/share/libalpm/hooks`.
 
 The AUR packages are in [`packaging/aur/`](packaging/aur/). See [its README](packaging/aur/README.md) for how to publish a release.
 

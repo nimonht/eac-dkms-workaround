@@ -161,6 +161,8 @@ STUB_DKMS_STATUS=''
 t_eq "dkms_state: unknown module" "$(dkms_state 580.196.07 7.2.15-arch1-1)" ''
 t_false "dkms_registered: unknown module" dkms_registered 580.196.07
 
+t_eq "show_build_log: silent when DKMS left no log" "$(show_build_log 0.0.0 2>&1)" ''
+
 # ---- staging the source tree from a package ------------------------------
 make_fake_pkg() { # <out> <dir version> <PACKAGE_VERSION>
     local root=$FIX/pkgroot-$2-$3
