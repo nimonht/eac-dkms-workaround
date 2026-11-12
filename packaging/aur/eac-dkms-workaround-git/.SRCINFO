@@ -1,0 +1,26 @@
+pkgbase = eac-dkms-workaround-git
+	pkgdesc = DKMS NVIDIA module for the stock Arch kernel next to the CachyOS EAC kernel prebuilt NVIDIA module (git)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/nimonht/eac-dkms-workaround
+	install = eac-dkms-workaround.install
+	arch = any
+	license = MIT
+	makedepends = git
+	depends = bash
+	depends = coreutils
+	depends = dkms
+	depends = kmod
+	depends = libarchive
+	depends = linux-headers
+	depends = pacman>=7.1
+	depends = util-linux
+	optdepends = limine-mkinitcpio-hook: regenerate Limine boot entries after a module rebuild
+	provides = eac-dkms-workaround
+	conflicts = eac-dkms-workaround
+	conflicts = nvidia-580xx-dkms
+	conflicts = nvidia-open-dkms
+	source = eac-dkms-workaround::git+https://github.com/nimonht/eac-dkms-workaround.git
+	sha256sums = SKIP
+
+pkgname = eac-dkms-workaround-git

@@ -1,0 +1,50 @@
+# Maintainer: nimonht <181256175+nimonht@users.noreply.github.com>
+
+pkgname=eac-dkms-workaround-git
+_repo=eac-dkms-workaround
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='DKMS NVIDIA module for the stock Arch kernel next to the CachyOS EAC kernel prebuilt NVIDIA module (git)'
+arch=('any')
+url='https://github.com/nimonht/eac-dkms-workaround'
+license=('MIT')
+depends=(
+    'bash'
+    'coreutils'
+    'dkms'
+    'kmod'
+    'libarchive'
+    'linux-headers'
+    'pacman>=7.1'
+    'util-linux'
+)
+makedepends=('git')
+optdepends=('limine-mkinitcpio-hook: regenerate Limine boot entries after a module rebuild')
+provides=("$_repo")
+# The official DKMS packages would collide with the extracted source tree.
+conflicts=("$_repo" 'nvidia-580xx-dkms' 'nvidia-open-dkms')
+install=eac-dkms-workaround.install
+source=("$_repo::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$_repo"
+    (
+        set -o pipefail
+        git describe --long --tags --abbrev=7 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+            printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+    )
+}
+
+build() {
+    make -C "$_repo"
+}
+
+check() {
+    make -C "$_repo" check
+}
+
+package() {
+    make -C "$_repo" DESTDIR="$pkgdir" PREFIX=/usr install
+    install -Dm644 "$_repo/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
