@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Warn when the EAC kernel has no NVIDIA module, and name the package to install (`linux-cachyos-eac-nvidia-open` or `-580xx`). `eac-setup` looks for an installed package named `*nvidia-open*`, so once this package replaces `nvidia-open-dkms` it installs the EAC kernel without its module. `sync` warns about it, `status` names the package, and the hook also runs when a kernel is installed, upgraded or removed, so the warning shows up in `eac-setup`'s own transaction.
+- The post-install message says how to install the EAC module.
+- Initramfs messages no longer assume chwd puts nvidia into the initramfs. Current chwd (`10-chwd-kms.conf`) doesn't.
+
 ## 0.1.0
 
 First release.
