@@ -22,12 +22,14 @@
 set -u
 shopt -s nullglob
 
-# Supported driver lines: "<userspace package> <DKMS source package>". CachyOS
-# builds each pair from one pkgbase, so their versions move together. The first
-# installed userspace package wins.
+# Supported driver lines: "<userspace package> <DKMS source package> <EAC
+# kernel module package>". CachyOS builds the first two from one pkgbase, so
+# their versions move together. The first installed userspace package wins.
 readonly -a DRIVERS=(
-    'nvidia-580xx-utils nvidia-580xx-dkms'  # Maxwell, Pascal, Volta (GTX 9xx/10xx)
-    'nvidia-utils nvidia-open-dkms'         # Turing and newer (GTX 16xx, RTX)
+    # Maxwell, Pascal, Volta (GTX 9xx/10xx)
+    'nvidia-580xx-utils nvidia-580xx-dkms linux-cachyos-eac-nvidia-580xx'
+    # Turing and newer (GTX 16xx, RTX)
+    'nvidia-utils nvidia-open-dkms linux-cachyos-eac-nvidia-open'
 )
 readonly MOD=nvidia
 readonly MARKER=.eac-dkms-workaround
@@ -50,6 +52,7 @@ readonly PKG_HOOK=/usr/share/libalpm/hooks/$HOOK_NAME
 
 UTILS_PKG=
 DKMS_PKG=
+EAC_PKG=
 HOOK_MODE=0
 HOOK_TARGETS=()
 TMP=
@@ -114,23 +117,24 @@ make_tmp() {
 # ---- packages ---------------------------------------------------------------
 
 utils_packages() {
-    local entry u d
+    local entry u
     for entry in "${DRIVERS[@]}"; do
-        read -r u d <<<"$entry"
+        read -r u _ <<<"$entry"
         printf '%s\n' "$u"
     done
 }
 
-# Set UTILS_PKG and DKMS_PKG from the installed NVIDIA userspace package.
-# `pacman -Qq` also resolves provides (nvidia-580xx-utils provides
+# Set UTILS_PKG, DKMS_PKG and EAC_PKG from the installed NVIDIA userspace
+# package. `pacman -Qq` also resolves provides (nvidia-580xx-utils provides
 # nvidia-utils), so compare the exact name.
 detect_driver() {
-    local entry u d
+    local entry u d e
     for entry in "${DRIVERS[@]}"; do
-        read -r u d <<<"$entry"
+        read -r u d e <<<"$entry"
         if [[ $(pacman -Qq "$u" 2>/dev/null) == "$u" ]]; then
             UTILS_PKG=$u
             DKMS_PKG=$d
+            EAC_PKG=$e
             return 0
         fi
     done
@@ -253,12 +257,16 @@ exclusive_regex() {
     printf '%s\n' "$regex"
 }
 
-# Installed kernels (not EAC) left without any nvidia module source: no headers
-# for DKMS and no prebuilt package.
+# Installed kernels left without any nvidia module source: an EAC kernel without
+# its prebuilt package, or another kernel with neither headers for DKMS nor a
+# prebuilt package.
 uncovered_kernels() {
     local k
     while read -r k; do
-        is_eac_kernel "$k" || has_headers "$k" || has_prebuilt_module "$k" || printf '%s\n' "$k"
+        has_prebuilt_module "$k" && continue
+        if is_eac_kernel "$k" || ! has_headers "$k"; then
+            printf '%s\n' "$k"
+        fi
     done < <(installed_kernels)
 }
 
@@ -439,8 +447,9 @@ utils_ships_firmware() {
     return 1
 }
 
-# chwd puts nvidia into every initramfs (/etc/mkinitcpio.conf.d/10-chwd.conf),
-# so a kernel whose module changed needs a new initramfs.
+# The initramfs may contain nvidia (MODULES in mkinitcpio.conf, or the
+# /etc/mkinitcpio.conf.d/10-chwd.conf of older chwd versions), so a kernel whose
+# module changed needs a new initramfs.
 regen_initramfs() {
     (( $# )) || return 0
     if (( HOOK_MODE )) && in_list "$UTILS_PKG" "${HOOK_TARGETS[@]}" && utils_ships_firmware; then
@@ -589,9 +598,17 @@ cmd_sync() {
     return 0
 }
 
+# eac-setup picks the EAC module by looking for an installed package named
+# *nvidia-open* or *nvidia-580xx*. On the nvidia-utils line that was often only
+# nvidia-open-dkms, which this package replaces, so eac-setup then installs the
+# EAC kernel without its module.
 warn_uncovered() {
     local k pb
     while read -r k; do
+        if is_eac_kernel "$k"; then
+            warn "EAC kernel $k has no nvidia module: sudo pacman -S --needed ${EAC_PKG:-linux-cachyos-eac-nvidia-open}"
+            continue
+        fi
         pb=$(kernel_pkgbase "$k")
         warn "kernel $k has no nvidia module: install ${pb:-its}-headers so DKMS can build for it"
     done < <(uncovered_kernels)
@@ -619,8 +636,8 @@ after_clean_notes() {
     local dkms_pkg='the official NVIDIA DKMS package'
     detect_driver && dkms_pkg=$DKMS_PKG
     log "notes:"
-    log "  - kernels without a prebuilt module now have no nvidia module, so their initramfs"
-    log "    can't be built (chwd adds nvidia to it): install $dkms_pkg before the next kernel update"
+    log "  - kernels without a prebuilt module now have no nvidia module (if nvidia is in the"
+    log "    initramfs, mkinitcpio fails for them): install $dkms_pkg before the next kernel update"
     log "  - dkms stays installed ($dkms_pkg needs it), and so does DKMS's signing key in /var/lib/dkms"
     log "  - with $dkms_pkg installed, DKMS builds for every kernel with headers, also those with a"
     log "    prebuilt linux-cachyos-nvidia-* module, which it then overrides: keep only one of the two"
@@ -650,6 +667,7 @@ Type = Path
 Operation = Install
 Operation = Upgrade
 Operation = Remove
+Target = usr/lib/modules/*/vmlinuz
 Target = usr/lib/modules/*/build/include/
 Target = usr/lib/modules/*/extramodules/$MOD.ko*
 
@@ -800,14 +818,16 @@ cmd_status() {
             */updates/dkms/*) kind=dkms ;;
             */extramodules/*) kind=prebuilt ;;
             '')
-                if is_eac_kernel "$k"; then
+                if is_eac_kernel "$k" && [[ -n $EAC_PKG ]]; then
+                    kind="MISSING: sudo pacman -S --needed $EAC_PKG"
+                elif is_eac_kernel "$k"; then
                     kind="MISSING: install its linux-cachyos-eac-nvidia-* package"
                 elif ! has_headers "$k"; then
                     kind="MISSING: install ${pb:-its}-headers so DKMS can build for it"
                 else
                     kind="MISSING: run sudo $ME sync"
                 fi
-                kind+=" (mkinitcpio fails for this kernel and limine keeps a stale boot entry)"
+                kind+=" (if nvidia is in the initramfs, mkinitcpio fails and limine keeps a stale entry)"
                 (( problems++ )) ;;
             *) kind="other: $path" ;;
         esac
@@ -896,7 +916,7 @@ Manual install (not needed when installed as a package):
   uninstall   clean, then remove that script and hook
 
 Driver lines (picked from the installed userspace package):
-$(for e in "${DRIVERS[@]}"; do read -r u d <<<"$e"; printf '  %-20s -> %s\n' "$u" "$d"; done)
+$(for e in "${DRIVERS[@]}"; do read -r u d m <<<"$e"; printf '  %-20s -> %-18s EAC kernel: %s\n' "$u" "$d" "$m"; done)
 EOF
 }
 

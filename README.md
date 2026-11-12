@@ -9,7 +9,8 @@ Run CachyOS's Easy Anti-Cheat kernel (`linux-cachyos-eac`) with its prebuilt NVI
 - CachyOS kernels have prebuilt modules (`linux-cachyos-nvidia-*`) that can be installed next to the EAC one. Arch's own kernels have no prebuilt module you can rely on:
   - Arch's `nvidia-open` is built for Arch's `nvidia-utils` version, not CachyOS's.
   - The CachyOS rebuild of it lags behind Arch kernel releases.
-- chwd adds `MODULES+=(nvidia …)` to every initramfs. On a kernel with no module, mkinitcpio fails and `limine-mkinitcpio` skips that kernel. Its boot entry keeps the old vmlinuz and initramfs, so after a kernel update that entry boots with no loadable modules.
+- A kernel with no NVIDIA module boots without the NVIDIA driver. If the initramfs also contains nvidia (`MODULES+=(nvidia …)` in your mkinitcpio config, or in `/etc/mkinitcpio.conf.d/10-chwd.conf` from older chwd versions), it gets worse: mkinitcpio fails and `limine-mkinitcpio` skips that kernel. Its boot entry keeps the old vmlinuz and initramfs, so after a kernel update that entry boots with no loadable modules. Current chwd leaves nvidia out of the initramfs; its `10-chwd-kms.conf` only drops the `kms` hook.
+- `eac-setup` picks the EAC NVIDIA module by looking for an installed package whose name contains `nvidia-580xx` or `nvidia-open`. On the `nvidia-utils` line, `nvidia-open-dkms` is often the only such package. Once this package replaces it, `eac-setup` installs the EAC kernel without its NVIDIA module, so install that yourself (see [Install](#install)).
 
 ## How it works
 
@@ -23,7 +24,8 @@ Run CachyOS's Easy Anti-Cheat kernel (`linux-cachyos-eac`) with its prebuilt NVI
 - **The pacman hook `80-eac-dkms-workaround.hook`** runs `sync --hook` when:
   - the NVIDIA driver is updated, or this package is installed;
   - kernel headers are added or removed, so installing `linux-zen-headers` builds for zen;
-  - a prebuilt module is added or removed. Installing `linux-cachyos-nvidia-*` drops the DKMS build that would otherwise shadow it.
+  - a prebuilt module is added or removed. Installing `linux-cachyos-nvidia-*` drops the DKMS build that would otherwise shadow it;
+  - a kernel is installed, upgraded or removed. Installing `linux-cachyos-eac` without its NVIDIA module prints a warning with the package to install.
 
   The hook sets `NetworkAccess = allowed`, because pacman ≥ 7.1 runs hooks without network. When the NVIDIA utils package changes, its firmware makes `90-mkinitcpio-install` rebuild every initramfs. In every other case `sync` regenerates the affected kernels' initramfs itself.
 - **Failures don't make things worse.** The new version is downloaded and built before the old one is removed, so a failed download or build leaves the working module in place. In hook mode, `sync` always exits 0 and prints a retry command.
@@ -58,6 +60,15 @@ eac-dkms-workaround status
 
 The package's hook runs `sync` at the end of the install transaction. `sync` downloads the DKMS source, builds the module for each kernel that needs it and regenerates their initramfs.
 
+Then install the EAC kernel's NVIDIA module yourself, before or after `sudo eac-setup`. Once `nvidia-open-dkms` is gone, `eac-setup` doesn't detect it (see [The problem](#the-problem)):
+
+```sh
+sudo pacman -S --needed linux-cachyos-eac-nvidia-open     # Turing and newer, with nvidia-utils
+sudo pacman -S --needed linux-cachyos-eac-nvidia-580xx    # Maxwell, Pascal, Volta, with nvidia-580xx-utils
+```
+
+On the `nvidia-utils` line, `sudo chwd -a` installs it too, but only if chwd's NVIDIA profile isn't installed yet. Installing that profile adds `<kernel>-nvidia-open` for every `linux-cachyos*` kernel, so it also switches `linux-cachyos` to its prebuilt module. The hook then drops the DKMS build for that kernel.
+
 ### From this repository with makepkg
 
 ```sh
@@ -76,7 +87,7 @@ sudo ./eac-dkms-workaround install     # → /usr/local/bin + /etc/pacman.d/hook
 
 | Command | What it does |
 |---|---|
-| `eac-dkms-workaround status` | Show the managed trees, the kernel pattern, `dkms status`, and the module each kernel uses. Flags missing or duplicate modules, version mismatches, and whether the official fix has landed |
+| `eac-dkms-workaround status` | Show the managed trees, the kernel pattern, `dkms status`, and the module each kernel uses. Flags missing or duplicate modules (naming the EAC module package when the EAC kernel has none), version mismatches, and whether the official fix has landed |
 | `sudo eac-dkms-workaround sync` | Make the DKMS source match the installed driver and the installed kernels; does nothing if already current |
 | `sudo eac-dkms-workaround clean` | Remove the managed source trees and their DKMS entries |
 | `sudo eac-dkms-workaround fetch-test` | Only download and signature-check the DKMS package, then clean up (diagnostic) |
@@ -100,14 +111,14 @@ Install the new driver line's packages (`nvidia-utils`, `linux-cachyos-eac-nvidi
 
 ## Limits
 
-- If an NVIDIA driver fails to compile against a new kernel, that kernel's initramfs build fails and Limine keeps its old entry. `status` shows the kernel as `MISSING`. The official DKMS package has the same risk.
+- If an NVIDIA driver fails to compile against a new kernel, that kernel has no NVIDIA module. If nvidia is in the initramfs, its initramfs build also fails and Limine keeps its old entry. `status` shows the kernel as `MISSING`. The official DKMS package has the same risk.
 - A kernel with neither headers nor a prebuilt module gets no NVIDIA module. `sync` and `status` warn about it and name the headers package to install.
 
 ## Testing
 
 `make check test` runs the offline suite. It needs no root, no network and no NVIDIA hardware.
 - `make check` runs `bash -n` and shellcheck over the script, the tests and the `.install` file.
-- `make test` runs `tests/run.sh`: 72 tests that replace pacman, dkms and limine-mkinitcpio with stubs and use fixture directories.
+- `make test` runs `tests/run.sh`: 78 tests that replace pacman, dkms and limine-mkinitcpio with stubs and use fixture directories.
 - The tests cover version handling, kernel flavor patterns and which kernels qualify, driver detection, the hook's content, the `dkms.conf` block, which source trees count as managed, `dkms status` parsing, extracting the source from a package, and when the initramfs is regenerated.
 
 The PKGBUILDs run the same targets in `check()`. CI (`.github/workflows/ci.yml`) also runs namcap, `make srcinfo-check` and a full `makepkg` build in an Arch container.

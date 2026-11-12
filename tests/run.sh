@@ -82,7 +82,7 @@ limine-mkinitcpio() {
 
 reset_stubs() {
     STUB_INSTALLED=() STUB_PROVIDES=() STUB_OWNED=() STUB_REPO=() STUB_DKMS_STATUS=''
-    UTILS_PKG='' DKMS_PKG='' HOOK_MODE=0 HOOK_TARGETS=()
+    UTILS_PKG='' DKMS_PKG='' EAC_PKG='' HOOK_MODE=0 HOOK_TARGETS=()
     rm -f "$FIX/limine.calls"
 }
 
@@ -104,11 +104,13 @@ STUB_INSTALLED=("nvidia-580xx-utils 580.196.07-2")
 STUB_PROVIDES=("nvidia-utils nvidia-580xx-utils")
 detect_driver
 t_eq "detect: 580xx line, despite it providing nvidia-utils" "$UTILS_PKG -> $DKMS_PKG" "nvidia-580xx-utils -> nvidia-580xx-dkms"
+t_eq "detect: 580xx EAC module" "$EAC_PKG" linux-cachyos-eac-nvidia-580xx
 
 reset_stubs
 STUB_INSTALLED=("nvidia-utils 620.70.06-2")
 detect_driver
 t_eq "detect: current (RTX) line" "$UTILS_PKG -> $DKMS_PKG" "nvidia-utils -> nvidia-open-dkms"
+t_eq "detect: current EAC module" "$EAC_PKG" linux-cachyos-eac-nvidia-open
 
 reset_stubs
 t_false "detect: fails with no NVIDIA userspace" detect_driver
@@ -124,7 +126,7 @@ for line in '[Trigger]' 'Type = Package' 'Operation = Install' 'Operation = Upgr
     'Target = nvidia-580xx-utils' 'Target = nvidia-utils' \
     'Target = eac-dkms-workaround' 'Target = eac-dkms-workaround-git' \
     '[Action]' 'When = PostTransaction' 'Exec = /opt/bin/eac-dkms-workaround sync --hook' \
-    'Type = Path' 'Target = usr/lib/modules/*/build/include/' \
+    'Type = Path' 'Target = usr/lib/modules/*/vmlinuz' 'Target = usr/lib/modules/*/build/include/' \
     'Target = usr/lib/modules/*/extramodules/nvidia.ko*' \
     'NeedsTargets' 'NetworkAccess = allowed'; do
     t_true "hook has: $line" grep -qxF -- "$line" <<<"$hook"
@@ -168,6 +170,19 @@ t_eq "installed_kernels: only directories with a kernel tree" \
 t_eq "eligible: headers, no prebuilt module, not EAC" \
     "$(eligible_kernels | LC_ALL=C sort | paste -sd' ')" "6.12.58-1-lts 6.17.8-zen1-1-zen 7.2.15-arch1-1"
 t_eq "uncovered: no headers and no prebuilt module" "$(uncovered_kernels)" 6.17.8-hardened1-1-hardened
+mkkernel 7.3.4-1-cachyos-eac
+t_eq "uncovered: EAC kernel without its prebuilt module" \
+    "$(uncovered_kernels | LC_ALL=C sort | paste -sd' ')" "6.17.8-hardened1-1-hardened 7.3.4-1-cachyos-eac"
+reset_stubs
+STUB_INSTALLED=("nvidia-utils 620.70.06-2")
+detect_driver
+echo linux-hardened >"$MOD_ROOT/6.17.8-hardened1-1-hardened/pkgbase"
+warnings=$(warn_uncovered 2>&1)
+t_true "warn_uncovered: names the EAC module package" \
+    grep -qxF -- "==> WARNING: EAC kernel 7.3.4-1-cachyos-eac has no nvidia module: sudo pacman -S --needed linux-cachyos-eac-nvidia-open" <<<"$warnings"
+t_true "warn_uncovered: names the headers package" \
+    grep -qxF -- "==> WARNING: kernel 6.17.8-hardened1-1-hardened has no nvidia module: install linux-hardened-headers so DKMS can build for it" <<<"$warnings"
+rm -rf "$MOD_ROOT/7.3.4-1-cachyos-eac" "$MOD_ROOT/6.17.8-hardened1-1-hardened/pkgbase"
 t_true "is_eac_kernel: linux-cachyos-eac" is_eac_kernel 7.3.3-2-cachyos-eac
 t_false "is_eac_kernel: linux-cachyos" is_eac_kernel 7.3.3-1-cachyos
 t_eq "kernel_pkgbase reads pkgbase" "$(kernel_pkgbase 7.2.15-arch1-1)" linux
