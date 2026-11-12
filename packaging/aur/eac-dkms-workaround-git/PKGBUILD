@@ -41,7 +41,7 @@ build() {
 }
 
 check() {
-    make -C "$_repo" check
+    make -C "$_repo" check test
 }
 
 package() {

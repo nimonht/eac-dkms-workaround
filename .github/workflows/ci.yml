@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git shellcheck namcap
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lint and unit tests
+        run: make check test
+
+      # makepkg refuses to run as root.
+      - name: PKGBUILD checks and package build
+        run: |
+          useradd -m builder
+          chown -R builder: .
+          su builder -c '
+            set -e
+            make srcinfo-check
+            namcap packaging/aur/*/PKGBUILD
+            cp -r packaging/aur/eac-dkms-workaround-git /tmp/build
+            sed -i "s#git+\$url.git#git+file://$PWD#" /tmp/build/PKGBUILD
+            cd /tmp/build
+            makepkg -f --noconfirm --nodeps
+            namcap ./*.pkg.tar.zst
+          '

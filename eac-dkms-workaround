@@ -33,8 +33,9 @@ readonly MOD=nvidia
 readonly KERNEL_ALLOW='-arch[0-9]+-[0-9]+$'
 readonly MARKER=.eac-dkms-workaround
 readonly STAGE_PARENT=/var/tmp
-readonly SRC_ROOT=/usr/src
-readonly MOD_ROOT=/usr/lib/modules
+# Not readonly, so the test suite can point them at fixture directories.
+SRC_ROOT=/usr/src
+MOD_ROOT=/usr/lib/modules
 readonly ME=eac-dkms-workaround
 # Package names this script is shipped as (their install also triggers the hook).
 readonly -a PKG_NAMES=(eac-dkms-workaround eac-dkms-workaround-git)
@@ -558,7 +559,7 @@ cmd_uninstall() {
 }
 
 cmd_status() {
-    local want= avail= ver= pkg t m d k pb path kind mver conf c n problems=0
+    local want='' avail='' ver='' pkg t m d k pb path kind mver conf c n problems=0
     local -a active=() trees=()
 
     echo "== $ME status"
@@ -743,4 +744,9 @@ main() {
     esac
 }
 
-main "$@"; exit
+# Run only when executed, so tests can source the functions. The whole if-block
+# is parsed before it runs, so `uninstall` deleting this file is safe.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+    exit
+fi

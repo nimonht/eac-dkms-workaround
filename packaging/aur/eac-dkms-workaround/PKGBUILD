@@ -30,7 +30,7 @@ build() {
 }
 
 check() {
-    make -C "$pkgname" check
+    make -C "$pkgname" check test
 }
 
 package() {
