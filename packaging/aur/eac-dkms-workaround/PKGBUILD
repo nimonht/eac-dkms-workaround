@@ -18,6 +18,8 @@ depends=(
 )
 makedepends=('git')
 optdepends=(
+    'linux-cachyos-eac-nvidia-open: NVIDIA module of the EAC kernel, with nvidia-utils'
+    'linux-cachyos-eac-nvidia-580xx: NVIDIA module of the EAC kernel, with nvidia-580xx-utils'
     'linux-headers: build for the stock linux kernel'
     'linux-lts-headers: build for linux-lts'
     'linux-zen-headers: build for linux-zen'

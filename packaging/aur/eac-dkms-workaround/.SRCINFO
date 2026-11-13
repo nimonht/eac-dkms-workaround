@@ -14,6 +14,8 @@ pkgbase = eac-dkms-workaround
 	depends = libarchive
 	depends = pacman>=7.1
 	depends = util-linux
+	optdepends = linux-cachyos-eac-nvidia-open: NVIDIA module of the EAC kernel, with nvidia-utils
+	optdepends = linux-cachyos-eac-nvidia-580xx: NVIDIA module of the EAC kernel, with nvidia-580xx-utils
 	optdepends = linux-headers: build for the stock linux kernel
 	optdepends = linux-lts-headers: build for linux-lts
 	optdepends = linux-zen-headers: build for linux-zen
