@@ -1,7 +1,7 @@
 # Maintainer: nimonht <181256175+nimonht@users.noreply.github.com>
 
 pkgname=eac-dkms-workaround
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='DKMS NVIDIA modules for non-CachyOS kernels next to the CachyOS EAC kernel'
 arch=('any')
@@ -18,6 +18,8 @@ depends=(
 )
 makedepends=('git')
 optdepends=(
+    'linux-cachyos-eac-nvidia-open: NVIDIA module of the EAC kernel, with nvidia-utils'
+    'linux-cachyos-eac-nvidia-580xx: NVIDIA module of the EAC kernel, with nvidia-580xx-utils'
     'linux-headers: build for the stock linux kernel'
     'linux-lts-headers: build for linux-lts'
     'linux-zen-headers: build for linux-zen'

@@ -12,9 +12,6 @@ post_install() {
     echo '    module (linux, linux-lts, linux-zen, ...). Install <kernel>-headers for'
     echo '    each such kernel. Check the result with:'
     echo '      eac-dkms-workaround status'
-    echo '    The EAC kernel needs its own NVIDIA module. eac-setup no longer picks'
-    echo '    it once nvidia-open-dkms is gone, so install it yourself:'
-    echo '      sudo pacman -S --needed linux-cachyos-eac-nvidia-open   # or -580xx'
     _manual_install_leftovers
 }
 

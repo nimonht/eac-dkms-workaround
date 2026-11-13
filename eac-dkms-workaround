@@ -22,14 +22,14 @@
 set -u
 shopt -s nullglob
 
-# Supported driver lines: "<userspace package> <DKMS source package> <EAC
-# kernel module package>". CachyOS builds the first two from one pkgbase, so
-# their versions move together. The first installed userspace package wins.
+# Supported driver lines: "<userspace package> <DKMS source package> <prebuilt
+# module suffix>". CachyOS builds the first two from one pkgbase, so their
+# versions move together. A kernel's prebuilt module package is
+# <kernel pkgbase>-<suffix>, e.g. linux-cachyos-eac-nvidia-open. The first
+# installed userspace package wins.
 readonly -a DRIVERS=(
-    # Maxwell, Pascal, Volta (GTX 9xx/10xx)
-    'nvidia-580xx-utils nvidia-580xx-dkms linux-cachyos-eac-nvidia-580xx'
-    # Turing and newer (GTX 16xx, RTX)
-    'nvidia-utils nvidia-open-dkms linux-cachyos-eac-nvidia-open'
+    'nvidia-580xx-utils nvidia-580xx-dkms nvidia-580xx'  # Maxwell, Pascal, Volta (GTX 9xx/10xx)
+    'nvidia-utils nvidia-open-dkms nvidia-open'          # Turing and newer (GTX 16xx, RTX)
 )
 readonly MOD=nvidia
 readonly MARKER=.eac-dkms-workaround
@@ -40,6 +40,9 @@ readonly STAGE_PARENT=/var/tmp
 # Not readonly, so the test suite can point them at fixture directories.
 SRC_ROOT=/usr/src
 MOD_ROOT=/usr/lib/modules
+MKINITCPIO_CONF=/etc/mkinitcpio.conf
+MKINITCPIO_PRESETS=/etc/mkinitcpio.d
+PACMAN_SYNC_DB=/var/lib/pacman/sync
 readonly ME=eac-dkms-workaround
 # Package names this script is shipped as (their install also triggers the hook).
 readonly -a PKG_NAMES=(eac-dkms-workaround eac-dkms-workaround-git)
@@ -52,9 +55,13 @@ readonly PKG_HOOK=/usr/share/libalpm/hooks/$HOOK_NAME
 
 UTILS_PKG=
 DKMS_PKG=
-EAC_PKG=
+PREBUILT_SUFFIX=
 HOOK_MODE=0
 HOOK_TARGETS=()
+# 1 while the workaround itself is being installed (package or manual install).
+INSTALLING=0
+# 1 once sync knows the driver line: fail() then still prints sync_notes.
+NOTES_ON_FAIL=0
 TMP=
 LOCK_FD=
 REBUILT=()
@@ -66,10 +73,12 @@ err()  { printf '==> ERROR: %s\n' "$*" >&2; }
 # Abort sync. In hook mode exit 0 so pacman finishes the transaction cleanly.
 fail() {
     err "$*"
-    if (( HOOK_MODE )); then
-        err "retry later with: sudo $ME sync"
-        exit 0
+    (( HOOK_MODE )) && err "retry later with: sudo $ME sync"
+    if (( NOTES_ON_FAIL )); then
+        NOTES_ON_FAIL=0
+        sync_notes
     fi
+    (( HOOK_MODE )) && exit 0
     exit 1
 }
 
@@ -124,17 +133,25 @@ utils_packages() {
     done
 }
 
-# Set UTILS_PKG, DKMS_PKG and EAC_PKG from the installed NVIDIA userspace
-# package. `pacman -Qq` also resolves provides (nvidia-580xx-utils provides
-# nvidia-utils), so compare the exact name.
-detect_driver() {
-    local entry u d e
+dkms_packages() {
+    local entry d
     for entry in "${DRIVERS[@]}"; do
-        read -r u d e <<<"$entry"
+        read -r _ d _ <<<"$entry"
+        printf '%s\n' "$d"
+    done
+}
+
+# Set UTILS_PKG, DKMS_PKG and PREBUILT_SUFFIX from the installed NVIDIA
+# userspace package. `pacman -Qq` also resolves provides (nvidia-580xx-utils
+# provides nvidia-utils), so compare the exact name.
+detect_driver() {
+    local entry u d s
+    for entry in "${DRIVERS[@]}"; do
+        read -r u d s <<<"$entry"
         if [[ $(pacman -Qq "$u" 2>/dev/null) == "$u" ]]; then
             UTILS_PKG=$u
             DKMS_PKG=$d
-            EAC_PKG=$e
+            PREBUILT_SUFFIX=$s
             return 0
         fi
     done
@@ -270,6 +287,28 @@ uncovered_kernels() {
     done < <(installed_kernels)
 }
 
+# What to do about a kernel that has no nvidia module.
+missing_module_hint() {
+    local k=$1 pb
+    pb=$(kernel_pkgbase "$k")
+    if is_eac_kernel "$k"; then
+        if [[ -n $pb && -n $PREBUILT_SUFFIX ]]; then
+            printf 'sudo pacman -S --needed %s-%s\n' "$pb" "$PREBUILT_SUFFIX"
+        else
+            printf 'install its prebuilt NVIDIA module package (%s-%s)\n' \
+                "${pb:-<kernel package>}" "${PREBUILT_SUFFIX:-nvidia-*}"
+        fi
+    elif ! has_headers "$k"; then
+        if [[ -n $pb ]]; then
+            printf 'install %s-headers so DKMS can build for it\n' "$pb"
+        else
+            printf 'install its headers package so DKMS can build for it\n'
+        fi
+    else
+        printf 'run sudo %s sync\n' "$ME"
+    fi
+}
+
 # ---- the managed source tree ------------------------------------------------
 
 # /usr/src/nvidia-* trees managed by this script: marked and owned by no package.
@@ -397,7 +436,7 @@ remove_other_trees() {
 fetch_pkg() {
     local want=$1 f
     mkdir -p "$TMP/db" "$TMP/cache" || return 1
-    cp -a /var/lib/pacman/sync "$TMP/db/" || return 1
+    cp -a "$PACMAN_SYNC_DB" "$TMP/db/" || return 1
     log "downloading $DKMS_PKG $want with pacman"
     pacman -Sddw --noconfirm --noprogressbar --dbpath "$TMP/db" \
         --cachedir "$TMP/cache" --logfile /dev/null "$DKMS_PKG" >&2 || return 1
@@ -447,18 +486,93 @@ utils_ships_firmware() {
     return 1
 }
 
-# The initramfs may contain nvidia (MODULES in mkinitcpio.conf, or the
-# /etc/mkinitcpio.conf.d/10-chwd.conf of older chwd versions), so a kernel whose
-# module changed needs a new initramfs.
-regen_initramfs() {
-    (( $# )) || return 0
-    if (( HOOK_MODE )) && in_list "$UTILS_PKG" "${HOOK_TARGETS[@]}" && utils_ships_firmware; then
-        log "initramfs: 90-mkinitcpio-install runs next ($UTILS_PKG firmware changed) and rebuilds all kernels"
+# Whether mkinitcpio puts nvidia modules into the initramfs: prints yes, no or
+# unknown. Reads MODULES the way mkinitcpio does: the config, then its drop-ins
+# in version order. Older chwd versions added nvidia there
+# (/etc/mkinitcpio.conf.d/10-chwd.conf), current ones don't. unknown: there is no
+# readable mkinitcpio config, or a preset uses a config of its own.
+initramfs_has_nvidia() {
+    local m mods
+    local -a presets=("$MKINITCPIO_PRESETS"/*.preset) dropins=("$MKINITCPIO_CONF.d"/*.conf)
+    if [[ ! -r $MKINITCPIO_CONF ]]; then
+        echo unknown
         return 0
     fi
-    local k pb out
+    if (( ${#presets[@]} )) && grep -Eqs '^[[:space:]]*[A-Za-z0-9_]+_config=' "${presets[@]}"; then
+        echo unknown
+        return 0
+    fi
+    if (( ${#dropins[@]} )); then
+        mapfile -t dropins < <(printf '%s\n' "${dropins[@]}" | LC_ALL=C sort -V)
+    fi
+    # The config is shell code that mkinitcpio sources as root too.
+    mods=$(
+        set +u
+        MODULES=()
+        # shellcheck disable=SC1090
+        source <(cat -- "$MKINITCPIO_CONF" "${dropins[@]}") </dev/null >/dev/null 2>&1 || exit 1
+        printf '%s\n' "${MODULES[@]}"
+    ) || { echo unknown; return 0; }
+    for m in $mods; do
+        if [[ $m == nvidia* ]]; then
+            echo yes
+            return 0
+        fi
+    done
+    echo no
+}
+
+# In a pacman hook: why 90-mkinitcpio-install, which runs after this hook,
+# rebuilds every initramfs anyway. Both mkinitcpio's hook and Limine's variant
+# do so when firmware or a dkms.conf changes. Prints the reason, or fails.
+mkinitcpio_hook_rebuilds_all() {
+    local d
+    (( HOOK_MODE )) || return 1
+    if in_list "$UTILS_PKG" "${HOOK_TARGETS[@]}" && utils_ships_firmware; then
+        printf '%s firmware changed\n' "$UTILS_PKG"
+        return 0
+    fi
+    while read -r d; do
+        if in_list "$d" "${HOOK_TARGETS[@]}"; then
+            printf '%s was removed\n' "$d"
+            return 0
+        fi
+    done < <(dkms_packages)
+    return 1
+}
+
+# In a pacman hook: whether 90-mkinitcpio-install rebuilds this kernel's
+# initramfs anyway, because the transaction changes the kernel itself or a
+# prebuilt module in its extramodules/.
+mkinitcpio_hook_rebuilds() {
+    local t
+    (( HOOK_MODE )) || return 1
+    for t in "${HOOK_TARGETS[@]}"; do
+        [[ $t == "usr/lib/modules/$1/vmlinuz" || $t == "usr/lib/modules/$1/extramodules/"* ]] && return 0
+    done
+    return 1
+}
+
+# A kernel whose module changed needs a new initramfs, if nvidia is in it.
+# Skips what mkinitcpio's own pacman hook rebuilds later in the transaction.
+regen_initramfs() {
+    (( $# )) || return 0
+    local k pb out why has
     local -a pkgs=()
+    has=$(initramfs_has_nvidia)
+    if [[ $has == no ]]; then
+        log "initramfs: left as it is (mkinitcpio does not put nvidia into it)"
+        return 0
+    fi
+    if why=$(mkinitcpio_hook_rebuilds_all); then
+        log "initramfs: 90-mkinitcpio-install runs next ($why) and rebuilds all kernels"
+        return 0
+    fi
     for k in "$@"; do
+        if mkinitcpio_hook_rebuilds "$k"; then
+            log "initramfs: 90-mkinitcpio-install runs next and rebuilds $k"
+            continue
+        fi
         pb=$(kernel_pkgbase "$k")
         if [[ -n $pb ]]; then
             in_list "$pb" "${pkgs[@]}" || pkgs+=("$pb")
@@ -468,7 +582,11 @@ regen_initramfs() {
     done
     (( ${#pkgs[@]} )) || return 0
     if ! command -v limine-mkinitcpio >/dev/null; then
-        warn "limine-mkinitcpio not found; regenerate the initramfs for: ${pkgs[*]}"
+        if [[ $has == yes ]]; then
+            warn "limine-mkinitcpio not found; regenerate the initramfs yourself for: ${pkgs[*]}"
+        else
+            warn "limine-mkinitcpio not found; if nvidia is in your initramfs, regenerate it for: ${pkgs[*]}"
+        fi
         return 1
     fi
     log "limine-mkinitcpio ${pkgs[*]}"
@@ -477,7 +595,7 @@ regen_initramfs() {
     out=$(limine-mkinitcpio "${pkgs[@]}" 2>&1)
     printf '%s\n' "$out" >&2
     if [[ $out == *"mkinitcpio failed"* || $out == *"module not found"* ]]; then
-        warn "initramfs generation reported errors for: ${pkgs[*]}"
+        warn "initramfs generation reported errors; fix them, then run: sudo limine-mkinitcpio ${pkgs[*]}"
         return 1
     fi
 }
@@ -485,10 +603,14 @@ regen_initramfs() {
 # ---- commands ---------------------------------------------------------------
 
 cmd_sync() {
+    local p
     if [[ ${1:-} == --hook ]]; then
         HOOK_MODE=1
         # The hook uses NeedsTargets: pacman passes the triggering targets.
         [[ -t 0 ]] || mapfile -t HOOK_TARGETS
+        for p in "${PKG_NAMES[@]}"; do
+            in_list "$p" "${HOOK_TARGETS[@]}" && INSTALLING=1
+        done
     fi
     need_root sync
     take_lock
@@ -497,6 +619,8 @@ cmd_sync() {
     if pacman -Q "$DKMS_PKG" &>/dev/null; then
         fail "the official $DKMS_PKG is installed, so this workaround is obsolete. Remove it (see: $ME help)"
     fi
+    # From here on, a failed sync still reports kernels without a module.
+    NOTES_ON_FAIL=1
     pacman -Q dkms &>/dev/null || fail "dkms is not installed. Run: sudo pacman -S --needed --asexplicit dkms"
 
     local want ver avail full tree cur regex k pkg staged missing fresh=0
@@ -521,8 +645,8 @@ cmd_sync() {
 
     if (( ${#kernels[@]} == 0 )) && [[ -z $cur ]]; then
         remove_other_trees ''
-        log "no kernel needs a DKMS build (each one has a prebuilt module or no headers)"
-        warn_uncovered
+        log "no kernel needs a DKMS build (each one has a prebuilt module, is an EAC kernel or has no headers)"
+        sync_notes
         return 0
     fi
 
@@ -544,7 +668,7 @@ cmd_sync() {
     if [[ $cur == "$full" ]] && (( ! missing && ${#extra[@]} == 0 )) \
         && [[ $(current_exclusive "$tree/dkms.conf") == "$regex" && $(managed_trees) == "$tree" ]]; then
         log "$DKMS_PKG $full is up to date for: ${kernels[*]:-no kernel}"
-        warn_uncovered
+        sync_notes
         return 0
     fi
 
@@ -593,25 +717,45 @@ cmd_sync() {
     remove_other_trees "$tree"
     install_for "$ver" "${kernels[@]}" || fail "dkms install of $MOD/$ver failed"
     log "$DKMS_PKG $full installed for: ${kernels[*]:-no kernel}"
-    regen_initramfs "${REBUILT[@]}" || warn "check the initramfs, then: sudo limine-mkinitcpio"
-    warn_uncovered
+    # regen_initramfs prints its own warnings.
+    regen_initramfs "${REBUILT[@]}" || :
+    sync_notes
     return 0
 }
 
-# eac-setup picks the EAC module by looking for an installed package named
-# *nvidia-open* or *nvidia-580xx*. On the nvidia-utils line that was often only
-# nvidia-open-dkms, which this package replaces, so eac-setup then installs the
-# EAC kernel without its module.
 warn_uncovered() {
-    local k pb
+    local k
     while read -r k; do
         if is_eac_kernel "$k"; then
-            warn "EAC kernel $k has no nvidia module: sudo pacman -S --needed ${EAC_PKG:-linux-cachyos-eac-nvidia-open}"
-            continue
+            warn "EAC kernel $k has no nvidia module: $(missing_module_hint "$k")"
+        else
+            warn "kernel $k has no nvidia module: $(missing_module_hint "$k")"
         fi
-        pb=$(kernel_pkgbase "$k")
-        warn "kernel $k has no nvidia module: install ${pb:-its}-headers so DKMS can build for it"
     done < <(uncovered_kernels)
+}
+
+# eac-setup installs the EAC kernel's NVIDIA module only if the name of an
+# installed package contains nvidia-580xx or nvidia-open. On the nvidia-utils
+# line that is often only nvidia-open-dkms, which this workaround replaces. Say
+# so when the workaround is installed and there is no EAC kernel yet. Once
+# there is one, warn_uncovered reports a missing module.
+eac_setup_note() {
+    local k
+    (( INSTALLING )) || return 0
+    [[ -n $PREBUILT_SUFFIX ]] || return 0
+    while read -r k; do
+        is_eac_kernel "$k" && return 0
+    done < <(installed_kernels)
+    pacman -Qq 2>/dev/null | grep -q -- "$PREBUILT_SUFFIX" && return 0
+    log "note: eac-setup will not install the EAC kernel's NVIDIA module on this system, because no"
+    log "  installed package is named *$PREBUILT_SUFFIX*. Before you run eac-setup, install it yourself:"
+    log "  sudo pacman -S --needed linux-cachyos-eac-$PREBUILT_SUFFIX"
+}
+
+# What every sync run ends with, also a failed one.
+sync_notes() {
+    warn_uncovered
+    eac_setup_note
 }
 
 # Remove the managed source trees and their DKMS entries. Keeps script and hook.
@@ -636,8 +780,10 @@ after_clean_notes() {
     local dkms_pkg='the official NVIDIA DKMS package'
     detect_driver && dkms_pkg=$DKMS_PKG
     log "notes:"
-    log "  - kernels without a prebuilt module now have no nvidia module (if nvidia is in the"
-    log "    initramfs, mkinitcpio fails for them): install $dkms_pkg before the next kernel update"
+    log "  - kernels without a prebuilt module have no nvidia module until you install $dkms_pkg"
+    if [[ $(initramfs_has_nvidia) != no ]]; then
+        log "    (do it before the next kernel update: with nvidia in the initramfs, mkinitcpio fails for them)"
+    fi
     log "  - dkms stays installed ($dkms_pkg needs it), and so does DKMS's signing key in /var/lib/dkms"
     log "  - with $dkms_pkg installed, DKMS builds for every kernel with headers, also those with a"
     log "    prebuilt linux-cachyos-nvidia-* module, which it then overrides: keep only one of the two"
@@ -662,6 +808,12 @@ Operation = Upgrade
 $(utils_packages | sed 's/^/Target = /')
 $(printf 'Target = %s\n' "${PKG_NAMES[@]}")
 
+# The official DKMS package was removed, e.g. replaced by this workaround.
+[Trigger]
+Type = Package
+Operation = Remove
+$(dkms_packages | sed 's/^/Target = /')
+
 [Trigger]
 Type = Path
 Operation = Install
@@ -680,6 +832,11 @@ NeedsTargets
 # DKMS package with pacman.
 NetworkAccess = allowed
 EOF
+}
+
+# Whether a manual install's hook file is the one this version writes.
+hook_is_current() {
+    [[ -f $1 && $(<"$1") == "$(print_hook "$SELF_DEST")" ]]
 }
 
 write_hook() {
@@ -716,6 +873,7 @@ cmd_install() {
     fi
     write_hook || { err "cannot write $HOOK_DEST"; exit 1; }
     log "installed $HOOK_DEST"
+    INSTALLING=1
     cmd_sync
 }
 
@@ -744,7 +902,7 @@ cmd_uninstall() {
 }
 
 cmd_status() {
-    local want='' avail='' ver='' pkg t m k pb path kind mver conf c n regex problems=0
+    local want='' avail='' ver='' pkg t m k pb path kind mver conf c n regex has problems=0
     local -a active=() trees=()
 
     echo "== $ME status"
@@ -772,6 +930,10 @@ cmd_status() {
         fi
     elif [[ -e $HOOK_DEST ]]; then
         printf '  %-26s %s\n' "installed as" "manual install ($SELF_DEST)"
+        if ! hook_is_current "$HOOK_DEST"; then
+            echo "  !! $HOOK_DEST is from another version; rewrite it with: sudo $(readlink -f -- "${BASH_SOURCE[0]}") install"
+            (( problems++ ))
+        fi
     else
         printf '  %-26s %s\n' "installed as" "not installed (no pacman hook)"
         (( problems++ ))
@@ -811,6 +973,7 @@ cmd_status() {
     fi
 
     echo "== nvidia module per kernel"
+    has=$(initramfs_has_nvidia)
     while read -r k; do
         pb=$(kernel_pkgbase "$k")
         path=$(modinfo -k "$k" -n "$MOD" 2>/dev/null)
@@ -818,16 +981,10 @@ cmd_status() {
             */updates/dkms/*) kind=dkms ;;
             */extramodules/*) kind=prebuilt ;;
             '')
-                if is_eac_kernel "$k" && [[ -n $EAC_PKG ]]; then
-                    kind="MISSING: sudo pacman -S --needed $EAC_PKG"
-                elif is_eac_kernel "$k"; then
-                    kind="MISSING: install its linux-cachyos-eac-nvidia-* package"
-                elif ! has_headers "$k"; then
-                    kind="MISSING: install ${pb:-its}-headers so DKMS can build for it"
-                else
-                    kind="MISSING: run sudo $ME sync"
+                kind="MISSING: $(missing_module_hint "$k")"
+                if [[ $has == yes ]]; then
+                    kind+=" (nvidia is in the initramfs, so mkinitcpio fails for this kernel)"
                 fi
-                kind+=" (if nvidia is in the initramfs, mkinitcpio fails and limine keeps a stale entry)"
                 (( problems++ )) ;;
             *) kind="other: $path" ;;
         esac
@@ -916,7 +1073,7 @@ Manual install (not needed when installed as a package):
   uninstall   clean, then remove that script and hook
 
 Driver lines (picked from the installed userspace package):
-$(for e in "${DRIVERS[@]}"; do read -r u d m <<<"$e"; printf '  %-20s -> %-18s EAC kernel: %s\n' "$u" "$d" "$m"; done)
+$(for e in "${DRIVERS[@]}"; do read -r u d m <<<"$e"; printf '  %-20s -> %-18s EAC kernel: linux-cachyos-eac-%s\n' "$u" "$d" "$m"; done)
 EOF
 }
 
