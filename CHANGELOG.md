@@ -1,30 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
-EAC kernel without its NVIDIA module:
-
-- `eac-setup` installs the EAC kernel's NVIDIA module only if the name of an installed package contains `nvidia-580xx` or `nvidia-open`. On the `nvidia-utils` line that is often only `nvidia-open-dkms`, which this package replaces. `sync` now warns when an EAC kernel has no NVIDIA module and prints the command that installs it. A `sync` that fails (download, build, repo out of step) prints the warning too.
-- When the workaround is installed and `eac-setup` would miss the module, `sync` says so and names the package. This replaces the unconditional text in the post-install message, which was wrong for the 580xx line.
-- The package to install follows the driver line and the kernel's own package name (`<kernel package>-nvidia-open` or `-nvidia-580xx`). `sync` and `status` share one hint for a kernel without a module.
+- Warns when the EAC kernel has no NVIDIA module and prints the command that installs it, also when `sync` itself fails. `eac-setup` only installs that module if an installed package is named `*nvidia-open*` or `*nvidia-580xx*`, and on the `nvidia-utils` line that is often only `nvidia-open-dkms`, which this package replaces. At install, `sync` says when this applies.
 - The EAC module packages are optional dependencies, so pacman lists them.
-
-Hook:
-
-- It also runs when a kernel is installed, upgraded or removed, so the warning shows up in `eac-setup`'s own transaction, and when the official DKMS package is removed.
-- `status` reports a manual install whose hook file is from another version. Run `install` again to rewrite it.
-
-Initramfs:
-
-- `sync` regenerates an initramfs only if nvidia is in it. It reads `MODULES` from the mkinitcpio config and its drop-ins. Current chwd (`10-chwd-kms.conf`) leaves nvidia out; older versions (`10-chwd.conf`) put it in.
-- In a pacman transaction, `sync` skips what mkinitcpio's own hook rebuilds right after: every kernel when the official DKMS package is removed (the first install built each initramfs twice), and a kernel that is installed or gets a prebuilt module in the same transaction.
+- The hook also runs when a kernel is installed, upgraded or removed, and when the official DKMS package is removed.
+- The initramfs is regenerated only if nvidia is in it (`MODULES` in the mkinitcpio config and its drop-ins), and not when mkinitcpio's own pacman hook rebuilds it later in the same transaction. The first install no longer builds every initramfs twice.
+- `status` names the package or command that fixes a kernel without a module, and reports a manual install whose hook file is from another version.
 - Without `limine-mkinitcpio`, `sync` no longer tells you to run it.
-
-Messages and tests:
-
-- A kernel whose package is unknown gets "install its headers package", not the package name `its-headers`.
-- The "no kernel needs a DKMS build" message no longer contradicts the EAC warning after it.
-- 157 tests, up from 72: `status`, the hints, the initramfs decisions, and `sync` and `clean` end to end with a stateful fake `dkms`.
+- 157 tests, up from 72, including `sync` and `clean` end to end.
 
 ## 0.1.0
 

@@ -1,6 +1,6 @@
 pkgbase = eac-dkms-workaround
 	pkgdesc = DKMS NVIDIA modules for non-CachyOS kernels next to the CachyOS EAC kernel
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/nimonht/eac-dkms-workaround
 	install = eac-dkms-workaround.install
@@ -23,7 +23,7 @@ pkgbase = eac-dkms-workaround
 	optdepends = limine-mkinitcpio-hook: regenerate Limine boot entries after a module rebuild
 	conflicts = nvidia-580xx-dkms
 	conflicts = nvidia-open-dkms
-	source = eac-dkms-workaround::git+https://github.com/nimonht/eac-dkms-workaround.git#tag=v0.1.0
+	source = eac-dkms-workaround::git+https://github.com/nimonht/eac-dkms-workaround.git#tag=v0.2.0
 	sha256sums = SKIP
 
 pkgname = eac-dkms-workaround
