@@ -2,7 +2,7 @@
 
 pkgname=eac-dkms-workaround-git
 _repo=eac-dkms-workaround
-pkgver=0.1.0
+pkgver=0.2.0.r0.g454c6c1
 pkgrel=1
 pkgdesc='DKMS NVIDIA modules for non-CachyOS kernels next to the CachyOS EAC kernel (git)'
 arch=('any')

@@ -72,6 +72,18 @@ sudo pacman -S --needed linux-cachyos-eac-nvidia-580xx    # Maxwell, Pascal, Vol
 
 On the `nvidia-utils` line, `sudo chwd -a` installs it too, but only if chwd's NVIDIA profile isn't installed yet. Installing that profile adds `<kernel>-nvidia-open` for every `linux-cachyos*` kernel, so it also switches `linux-cachyos` to its prebuilt module. The hook then drops the DKMS build for that kernel.
 
+On the `nvidia-580xx-utils` line, don't run `chwd -a`. Every chwd 580xx profile (`nvidia-dkms-580xx`, `nvidia-dkms-580xx.prime`) installs `nvidia-580xx-dkms`, so pacman stops with `nvidia-580xx-dkms … and linux-cachyos-eac-nvidia-580xx … are in conflict (NVIDIA-MODULE)`. Install the profile's packages yourself, leaving out the DKMS package and adding the prebuilt module for each CachyOS kernel:
+
+```sh
+sudo pacman -S --needed linux-cachyos-nvidia-580xx nvidia-580xx-settings libva-nvidia-driver \
+    lib32-vulkan-icd-loader cachyos-drm-awaiter
+# laptops (the .prime profile) also:
+sudo pacman -S --needed nvidia-prime switcheroo-control
+sudo systemctl enable --now switcheroo-control
+```
+
+chwd doesn't record a profile as installed this way, so `chwd -a` keeps trying the same DKMS profile and fails the same way. That failure changes nothing on the system.
+
 ### From this repository with makepkg
 
 ```sh

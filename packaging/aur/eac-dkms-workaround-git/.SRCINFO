@@ -1,6 +1,6 @@
 pkgbase = eac-dkms-workaround-git
 	pkgdesc = DKMS NVIDIA modules for non-CachyOS kernels next to the CachyOS EAC kernel (git)
-	pkgver = 0.1.0
+	pkgver = 0.2.0.r0.g454c6c1
 	pkgrel = 1
 	url = https://github.com/nimonht/eac-dkms-workaround
 	install = eac-dkms-workaround.install
